@@ -56,8 +56,8 @@ begin:
 			dns.DoHAddresses(net.JoinHostPort(host, port)),
 			dns.DoHTransport(&http.Transport{
 				MaxIdleConns:        http.DefaultMaxIdleConnsPerHost,
-				IdleConnTimeout:     90 * time.Second,
-				TLSHandshakeTimeout: 10 * time.Second,
+				IdleConnTimeout:     120 * time.Second,
+				TLSHandshakeTimeout: 30 * time.Second,
 				ForceAttemptHTTP2:   true,
 				TLSClientConfig: &tls.Config{
 					RootCAs: caPool,

@@ -29,9 +29,9 @@ type ProxyHandler struct {
 
 func NewProxyHandler(dialer dialer.ContextDialer, logger *clog.CondLogger) *ProxyHandler {
 	httptransport := &http.Transport{
-		MaxIdleConns:          100,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
+		MaxIdleConns:          50,
+		IdleConnTimeout:       120 * time.Second,
+		TLSHandshakeTimeout:   30 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 		DialContext:           dialer.DialContext,
 	}

@@ -226,8 +226,8 @@ func run() int {
 	mainLogger.Info("opera-proxy client version %s is starting...", version())
 
 	var d dialer.ContextDialer = &net.Dialer{
-		Timeout:   30 * time.Second,
-		KeepAlive: 30 * time.Second,
+		Timeout:   60 * time.Second,
+		KeepAlive: 60 * time.Second,
 	}
 
 	caPool := x509.NewCertPool()
@@ -314,9 +314,9 @@ func run() int {
 			return tls.Client(conn, tlsConfig), nil
 		},
 		ForceAttemptHTTP2:     true,
-		MaxIdleConns:          100,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
+		MaxIdleConns:          50,
+		IdleConnTimeout:       120 * time.Second,
+		TLSHandshakeTimeout:   30 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 	})
 	if err != nil {

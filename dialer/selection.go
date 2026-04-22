@@ -67,9 +67,9 @@ func SelectRandom(_ context.Context, dialers []ContextDialer) (ContextDialer, er
 func probeDialer(ctx context.Context, dialer ContextDialer, url string, dlLimit int64, tlsClientConfig *tls.Config) error {
 	httpClient := http.Client{
 		Transport: &http.Transport{
-			MaxIdleConns:          100,
-			IdleConnTimeout:       90 * time.Second,
-			TLSHandshakeTimeout:   10 * time.Second,
+			MaxIdleConns:          50,
+			IdleConnTimeout:       120 * time.Second,
+			TLSHandshakeTimeout:   30 * time.Second,
 			ExpectContinueTimeout: 1 * time.Second,
 			DialContext:           dialer.DialContext,
 			TLSClientConfig:       tlsClientConfig,
