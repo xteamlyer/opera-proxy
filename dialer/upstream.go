@@ -22,7 +22,25 @@ const (
 	PROXY_CONNECT_METHOD       = "CONNECT"
 	PROXY_HOST_HEADER          = "Host"
 	PROXY_AUTHORIZATION_HEADER = "Proxy-Authorization"
-	MISSING_CHAIN_CERT         = `-----BEGIN CERTIFICATE-----
+
+	// MISSING_CHAIN_CERT is a cross-signed intermediate certificate that bridges
+	// "USERTrust ECC Certification Authority" (The USERTRUST Network) to the legacy
+	// "AAA Certificate Services" root (Comodo).
+	//
+	// Opera proxy servers present a certificate chain that terminates at
+	// USERTrust ECC CA, but do NOT include USERTrust ECC CA itself in the TLS
+	// handshake. On modern systems USERTrust ECC CA is trusted directly, so
+	// verification succeeds without this cert. On older systems (old Android,
+	// unpatched Linux, custom CA stores) USERTrust ECC CA is absent, and
+	// verification fails.
+	//
+	// The cross-signed cert below carries the exact same public key as
+	// USERTrust ECC CA but is signed by the ubiquitous "AAA Certificate Services"
+	// Comodo root, which is present virtually everywhere. Injecting it into the
+	// Intermediates pool provides an alternative valid path to a trusted root.
+	//
+	// Valid until: 2028-12-31. When this cert expires it must be replaced.
+	MISSING_CHAIN_CERT = `-----BEGIN CERTIFICATE-----
 MIID0zCCArugAwIBAgIQVmcdBOpPmUxvEIFHWdJ1lDANBgkqhkiG9w0BAQwFADB7
 MQswCQYDVQQGEwJHQjEbMBkGA1UECAwSR3JlYXRlciBNYW5jaGVzdGVyMRAwDgYD
 VQQHDAdTYWxmb3JkMRowGAYDVQQKDBFDb21vZG8gQ0EgTGltaXRlZDEhMB8GA1UE
@@ -48,8 +66,22 @@ CV4Ks2dH/hzg1cEo70qLRDEmBDeNiXQ2Lu+lIg+DdEmSx/cQwgwp+7e9un/jX9Wf
 `
 )
 
-var missingLinkDER, _ = pem.Decode([]byte(MISSING_CHAIN_CERT))
-var missingLink, _ = x509.ParseCertificate(missingLinkDER.Bytes)
+// missingLink is the cross-signed intermediate parsed once at init time.
+// parseMissingLink panics early (at program start) if the bundled PEM is
+// somehow corrupted — better than a silent nil-deref later during TLS.
+var missingLink = parseMissingLink()
+
+func parseMissingLink() *x509.Certificate {
+	block, _ := pem.Decode([]byte(MISSING_CHAIN_CERT))
+	if block == nil {
+		panic("opera-proxy: failed to PEM-decode bundled MISSING_CHAIN_CERT")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		panic("opera-proxy: failed to parse bundled MISSING_CHAIN_CERT: " + err.Error())
+	}
+	return cert
+}
 
 type stringCb = func() (string, error)
 
@@ -146,9 +178,10 @@ func (d *ProxyDialer) DialContext(ctx context.Context, network, address string) 
 		return nil, err
 	}
 	if uTLSServerName != "" {
-		// Custom cert verification logic:
-		// DO NOT send SNI extension of TLS ClientHello
-		// DO peer certificate verification against specified servername
+		// Custom TLS verification strategy:
+		//   - Do NOT send SNI in ClientHello (use fakeSNI, may be empty string).
+		//   - Verify the peer certificate against the real server name.
+		//   - Optionally inject the cross-signed intermediate (certchain workaround).
 		conn = tls.Client(conn, &tls.Config{
 			ServerName:         fakeSNI,
 			InsecureSkipVerify: true,
@@ -158,15 +191,19 @@ func (d *ProxyDialer) DialContext(ctx context.Context, network, address string) 
 					Intermediates: x509.NewCertPool(),
 					Roots:         d.caPool,
 				}
-				waRequired := false
+				needWorkaround := false
 				for _, cert := range cs.PeerCertificates[1:] {
 					opts.Intermediates.AddCert(cert)
-					if d.intermediateWorkaround && !waRequired &&
-						bytes.Compare(cert.AuthorityKeyId, missingLink.SubjectKeyId) == 0 {
-						waRequired = true
+					// Detect if any intermediate was signed by USERTrust ECC CA
+					// (AuthorityKeyId matches missingLink.SubjectKeyId).
+					// If so, we must also inject the cross-signed version of that CA
+					// so that old trust stores can build a path to a known root.
+					if d.intermediateWorkaround && !needWorkaround &&
+						bytes.Equal(cert.AuthorityKeyId, missingLink.SubjectKeyId) {
+						needWorkaround = true
 					}
 				}
-				if waRequired {
+				if needWorkaround {
 					opts.Intermediates.AddCert(missingLink)
 				}
 				_, err := cs.PeerCertificates[0].Verify(opts)
@@ -225,6 +262,12 @@ func (d *ProxyDialer) Address() (string, error) {
 	return d.address()
 }
 
+// readResponse reads an HTTP/1.1 response from the raw conn after a CONNECT
+// request. It reads byte-by-byte until the \r\n\r\n header terminator is found,
+// then hands the accumulated bytes to http.ReadResponse.
+//
+// Note: byte-by-byte reading is intentional here — we do NOT want to over-read
+// past the end of headers into the tunneled TLS stream.
 func readResponse(r io.Reader, req *http.Request) (*http.Response, error) {
 	endOfResponse := []byte("\r\n\r\n")
 	buf := &bytes.Buffer{}
