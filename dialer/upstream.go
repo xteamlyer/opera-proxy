@@ -21,6 +21,11 @@ const (
 	PROXY_CONNECT_METHOD       = "CONNECT"
 	PROXY_HOST_HEADER          = "Host"
 	PROXY_AUTHORIZATION_HEADER = "Proxy-Authorization"
+
+	// Maximum bytes we'll buffer while reading a CONNECT response header.
+	// Real responses are ~50 bytes; 64 KiB is a generous ceiling that guards
+	// against a misbehaving upstream sending an unbounded header stream.
+	connectResponseMaxHeaderBytes = 64 * 1024
 )
 
 type stringCb = func() (string, error)
@@ -172,7 +177,7 @@ func (d *ProxyDialer) DialContext(ctx context.Context, network, address string) 
 	}
 
 	if proxyResp.StatusCode != http.StatusOK {
-		return nil, errors.New(fmt.Sprintf("bad response from upstream proxy server: %s", proxyResp.Status))
+		return nil, fmt.Errorf("bad response from upstream proxy server: %s", proxyResp.Status)
 	}
 
 	return conn, nil
@@ -186,31 +191,44 @@ func (d *ProxyDialer) Address() (string, error) {
 	return d.address()
 }
 
-func readResponse(r io.Reader, req *http.Request) (*http.Response, error) {
-	endOfResponse := []byte("\r\n\r\n")
-	buf := &bytes.Buffer{}
-	b := make([]byte, 1)
+// readResponse reads the HTTP/1.1 response to a CONNECT request from a raw
+// net.Conn without consuming any bytes past the \r\n\r\n header terminator.
+//
+// Why not bufio.Reader directly on the conn?
+// bufio.Reader reads ahead in chunks — it would silently consume bytes from
+// the beginning of the tunneled TLS stream, corrupting the connection.
+//
+// Solution: wrap conn in a TeeReader that copies every byte into hdrBuf as it
+// is read. We drive reads through bufio.ReadString('\n') which is efficient
+// (no per-byte syscall), but the underlying io.Reader is a LimitedReader over
+// the TeeReader — so the raw conn only advances exactly as far as we read.
+// http.ReadResponse then parses from the in-memory hdrBuf.
+func readResponse(conn io.Reader, req *http.Request) (*http.Response, error) {
+	var hdrBuf bytes.Buffer
+	limited := &io.LimitedReader{
+		R: io.TeeReader(conn, &hdrBuf),
+		N: connectResponseMaxHeaderBytes,
+	}
+	br := bufio.NewReader(limited)
+
 	for {
-		n, err := r.Read(b)
-		if n < 1 && err == nil {
-			continue
+		if limited.N <= 0 {
+			return nil, errors.New("CONNECT response header exceeds size limit")
 		}
-
-		buf.Write(b)
-		sl := buf.Bytes()
-		if len(sl) < len(endOfResponse) {
-			continue
+		_, err := br.ReadString('\n')
+		if err != nil && err != io.EOF {
+			return nil, fmt.Errorf("reading CONNECT response: %w", err)
 		}
-
-		if bytes.Equal(sl[len(sl)-4:], endOfResponse) {
+		sl := hdrBuf.Bytes()
+		if len(sl) >= 4 && bytes.Equal(sl[len(sl)-4:], []byte("\r\n\r\n")) {
 			break
 		}
-
-		if err != nil {
-			return nil, err
+		if err == io.EOF {
+			break
 		}
 	}
-	return http.ReadResponse(bufio.NewReader(buf), req)
+
+	return http.ReadResponse(bufio.NewReader(&hdrBuf), req)
 }
 
 func BasicAuthHeader(login, password string) string {

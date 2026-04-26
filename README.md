@@ -1,5 +1,9 @@
-opera-proxy
+opera-proxy fork
 ===========
+
+- Original author - [Snawoot](https://github.com/Snawoot)
+- Fork based - [Alexey71](https://github.com/Alexey71)
+- Some ideas - [SLY-F0X](https://github.com/SLY-F0X)
 
 Standalone Opera VPN client.
 
@@ -17,7 +21,7 @@ By default the application listens on 127.0.0.1:18080.
 
 #### Binaries
 
-Pre-built binaries are available [here](https://github.com/Alexey71/opera-proxy/releases/latest).
+Pre-built binaries are available [here](https://github.com/xteamlyer/opera-proxy/releases/latest).
 
 #### Build from source
 

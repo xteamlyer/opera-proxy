@@ -11,13 +11,14 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"runtime/debug"
+	"syscall"
 	"sort"
 	"strconv"
 	"strings"
@@ -26,12 +27,12 @@ import (
 
 	xproxy "golang.org/x/net/proxy"
 
-	"github.com/Alexey71/opera-proxy/clock"
-	"github.com/Alexey71/opera-proxy/dialer"
-	"github.com/Alexey71/opera-proxy/handler"
-	clog "github.com/Alexey71/opera-proxy/log"
-	"github.com/Alexey71/opera-proxy/resolver"
-	se "github.com/Alexey71/opera-proxy/seclient"
+	"github.com/xteamlyer/opera-proxy/clock"
+	"github.com/xteamlyer/opera-proxy/dialer"
+	"github.com/xteamlyer/opera-proxy/handler"
+	clog "github.com/xteamlyer/opera-proxy/log"
+	"github.com/xteamlyer/opera-proxy/resolver"
+	se "github.com/xteamlyer/opera-proxy/seclient"
 
 	_ "golang.org/x/crypto/x509roots/fallback"
 	"golang.org/x/crypto/x509roots/fallback/bundle"
@@ -188,7 +189,7 @@ func parse_args() *CLIArgs {
 	flag.BoolVar(&args.socksMode, "socks-mode", false, "listen for SOCKS requests instead of HTTP")
 	flag.IntVar(&args.verbosity, "verbosity", 20, "logging verbosity "+
 		"(10 - debug, 20 - info, 30 - warning, 40 - error, 50 - critical)")
-	flag.DurationVar(&args.timeout, "timeout", 10*time.Second, "timeout for network operations")
+	flag.DurationVar(&args.timeout, "timeout", 30*time.Second, "timeout for network operations")
 	flag.BoolVar(&args.showVersion, "version", false, "show program version and exit")
 	flag.StringVar(&args.proxy, "proxy", "", "sets base proxy to use for all dial-outs. "+
 		"Format: <http|https|socks5|socks5h>://[login:password@]host[:port] "+
@@ -221,7 +222,7 @@ func parse_args() *CLIArgs {
 	flag.DurationVar(&args.proxySpeedTimeout, "proxy-speed-timeout", 15*time.Second, "timeout for a single proxy speed measurement")
 	flag.Int64Var(&args.proxySpeedDLLimit, "proxy-speed-dl-limit", 262144, "limit of downloaded bytes for proxy speed measurement")
 	flag.Var(&args.serverSelection, "server-selection", "server selection policy (first/random/fastest)")
-	flag.DurationVar(&args.serverSelectionTimeout, "server-selection-timeout", 30*time.Second, "timeout given for server selection function to produce result")
+	flag.DurationVar(&args.serverSelectionTimeout, "server-selection-timeout", 60*time.Second, "timeout given for server selection function to produce result")
 	flag.StringVar(&args.serverSelectionTestURL, "server-selection-test-url", "https://ajax.googleapis.com/ajax/libs/angularjs/1.8.2/angular.min.js",
 		"URL used for download benchmark by fastest server selection policy")
 	flag.Int64Var(&args.serverSelectionDLLimit, "server-selection-dl-limit", 0, "restrict amount of downloaded data per connection by fastest server selection")
@@ -456,9 +457,10 @@ func newSEClient(args *CLIArgs, baseDialer dialer.ContextDialer, caPool *x509.Ce
 			}
 			return tls.Client(conn, tlsConfig), nil
 		},
-		ForceAttemptHTTP2:     true,
-		MaxIdleConns:          100,
-		IdleConnTimeout:       90 * time.Second,
+		ForceAttemptHTTP2:     false,
+		MaxIdleConns:          10,
+		MaxIdleConnsPerHost:   3,
+		IdleConnTimeout:       60 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 	})
@@ -661,7 +663,7 @@ func run() int {
 
 	caPool := x509.NewCertPool()
 	if args.caFile != "" {
-		certs, err := ioutil.ReadFile(args.caFile)
+		certs, err := os.ReadFile(args.caFile)
 		if err != nil {
 			mainLogger.Error("Can't load CA file: %v", err)
 			return 15
@@ -731,9 +733,9 @@ func run() int {
 		if args.apiProxyListURL != "" {
 			downloadTransport := &http.Transport{
 				DialContext:           d.DialContext,
-				ForceAttemptHTTP2:     true,
-				MaxIdleConns:          100,
-				IdleConnTimeout:       90 * time.Second,
+				ForceAttemptHTTP2:     false,
+				MaxIdleConns:          5,
+				IdleConnTimeout:       30 * time.Second,
 				TLSHandshakeTimeout:   10 * time.Second,
 				ExpectContinueTimeout: 1 * time.Second,
 			}
@@ -829,9 +831,10 @@ func run() int {
 				}
 				return tls.Client(conn, tlsConfig), nil
 			},
-			ForceAttemptHTTP2:     true,
-			MaxIdleConns:          100,
-			IdleConnTimeout:       90 * time.Second,
+			ForceAttemptHTTP2:     false,
+			MaxIdleConns:          10,
+			MaxIdleConnsPerHost:   3,
+			IdleConnTimeout:       60 * time.Second,
 			TLSHandshakeTimeout:   10 * time.Second,
 			ExpectContinueTimeout: 1 * time.Second,
 		})
@@ -1032,21 +1035,65 @@ func run() int {
 	})
 
 	mainLogger.Info("Starting proxy server...")
+	return runServer(args, handlerDialer, proxyLogger, socksLogger, mainLogger)
+}
+
+// runServer starts the proxy server and blocks until it exits.
+// On SIGTERM or SIGINT it performs a graceful shutdown:
+//   - HTTP mode: new connections are rejected; in-flight requests finish within
+//     shutdownGracePeriod before the process exits.
+//   - SOCKS mode: the go-socks5 library does not expose a shutdown mechanism,
+//     so we close the process cleanly after draining the signal.
+func runServer(args *CLIArgs, handlerDialer dialer.ContextDialer, proxyLogger *clog.CondLogger, socksLogger *log.Logger, mainLogger *clog.CondLogger) int {
+	const shutdownGracePeriod = 10 * time.Second
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+
 	if args.socksMode {
 		socks, initError := handler.NewSocksServer(handlerDialer, socksLogger, args.fakeSNI)
 		if initError != nil {
-			mainLogger.Critical("Failed to start: %v", err)
+			mainLogger.Critical("Failed to start SOCKS server: %v", initError)
 			return 16
 		}
 		mainLogger.Info("Init complete.")
-		err = socks.ListenAndServe("tcp", args.bindAddress)
-	} else {
-		h := handler.NewProxyHandler(handlerDialer, proxyLogger, args.fakeSNI)
-		mainLogger.Info("Init complete.")
-		err = http.ListenAndServe(args.bindAddress, h)
+		// SOCKS: run in goroutine, exit cleanly on signal.
+		errCh := make(chan error, 1)
+		go func() { errCh <- socks.ListenAndServe("tcp", args.bindAddress) }()
+		select {
+		case err := <-errCh:
+			mainLogger.Critical("SOCKS server terminated: %v", err)
+		case sig := <-sigCh:
+			mainLogger.Info("Received signal %v, shutting down...", sig)
+		}
+		return 0
 	}
-	mainLogger.Critical("Server terminated with a reason: %v", err)
-	mainLogger.Info("Shutting down...")
+
+	h := handler.NewProxyHandler(handlerDialer, proxyLogger, args.fakeSNI)
+	srv := &http.Server{
+		Addr:    args.bindAddress,
+		Handler: h,
+	}
+	mainLogger.Info("Init complete.")
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.ListenAndServe() }()
+
+	select {
+	case err := <-errCh:
+		mainLogger.Critical("Server terminated: %v", err)
+		return 0
+	case sig := <-sigCh:
+		mainLogger.Info("Received signal %v, starting graceful shutdown...", sig)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownGracePeriod)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		mainLogger.Error("Graceful shutdown error: %v", err)
+	} else {
+		mainLogger.Info("Graceful shutdown complete.")
+	}
 	return 0
 }
 

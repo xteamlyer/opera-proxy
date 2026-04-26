@@ -12,14 +12,43 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Alexey71/opera-proxy/dialer"
-	clog "github.com/Alexey71/opera-proxy/log"
+	"github.com/xteamlyer/opera-proxy/dialer"
+	clog "github.com/xteamlyer/opera-proxy/log"
 )
 
 const (
 	COPY_BUF    = 128 * 1024
 	BAD_REQ_MSG = "Bad Request\n"
+
+	// Reduced idle connection pool: the proxy handler makes per-request upstream
+	// connections; large idle pools waste goroutines and file descriptors.
+	transportMaxIdleConns        = 10
+	transportMaxIdleConnsPerHost = 2
+	transportIdleConnTimeout     = 60 * time.Second
 )
+
+// copyBufPool reuses 128 KiB buffers across copy operations,
+// avoiding a heap allocation per active connection.
+var copyBufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, COPY_BUF)
+		return &b
+	},
+}
+
+// hopHeadersMap is a set of hop-by-hop header names that must be stripped
+// before forwarding requests or responses. Using a map gives O(1) lookup
+// instead of a linear scan over a slice.
+var hopHeadersMap = map[string]struct{}{
+	"Connection":          {},
+	"Keep-Alive":          {},
+	"Proxy-Authenticate":  {},
+	"Proxy-Connection":    {},
+	"Te":                  {}, // canonicalized version of "TE"
+	"Trailers":            {},
+	"Transfer-Encoding":   {},
+	"Upgrade":             {},
+}
 
 type ProxyHandler struct {
 	logger        *clog.CondLogger
@@ -30,8 +59,9 @@ type ProxyHandler struct {
 
 func NewProxyHandler(dialer dialer.ContextDialer, logger *clog.CondLogger, fakeSNI string) *ProxyHandler {
 	httptransport := &http.Transport{
-		MaxIdleConns:          100,
-		IdleConnTimeout:       90 * time.Second,
+		MaxIdleConns:          transportMaxIdleConns,
+		MaxIdleConnsPerHost:   transportMaxIdleConnsPerHost,
+		IdleConnTimeout:       transportIdleConnTimeout,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 		DialContext:           dialer.DialContext,
@@ -130,7 +160,9 @@ func proxy(ctx context.Context, left net.Conn, leftReader io.Reader, right net.C
 	}
 	rtl := func(dst, src net.Conn) {
 		defer wg.Done()
-		io.Copy(dst, src)
+		bufp := copyBufPool.Get().(*[]byte)
+		defer copyBufPool.Put(bufp)
+		io.CopyBuffer(dst, src, *bufp)
 		dst.Close()
 	}
 	wg.Add(2)
@@ -182,19 +214,6 @@ func proxyh2(ctx context.Context, leftreader io.ReadCloser, leftwriter io.Writer
 	return
 }
 
-// Hop-by-hop headers. These are removed when sent to the backend.
-// http://www.w3.org/Protocols/rfc2616/rfc2616-sec13.html
-var hopHeaders = []string{
-	"Connection",
-	"Keep-Alive",
-	"Proxy-Authenticate",
-	"Proxy-Connection",
-	"Te", // canonicalized version of "TE"
-	"Trailers",
-	"Transfer-Encoding",
-	"Upgrade",
-}
-
 func copyHeader(dst, src http.Header) {
 	for k, vv := range src {
 		for _, v := range vv {
@@ -204,7 +223,7 @@ func copyHeader(dst, src http.Header) {
 }
 
 func delHopHeaders(header http.Header) {
-	for _, h := range hopHeaders {
+	for h := range hopHeadersMap {
 		header.Del(h)
 	}
 }
@@ -237,12 +256,13 @@ func flush(flusher interface{}) bool {
 }
 
 func copyBody(wr io.Writer, body io.Reader) {
-	buf := make([]byte, COPY_BUF)
+	bufp := copyBufPool.Get().(*[]byte)
+	defer copyBufPool.Put(bufp)
 	for {
-		bread, read_err := body.Read(buf)
+		bread, read_err := body.Read(*bufp)
 		var write_err error
 		if bread > 0 {
-			_, write_err = wr.Write(buf[:bread])
+			_, write_err = wr.Write((*bufp)[:bread])
 			flush(wr)
 		}
 		if read_err != nil || write_err != nil {

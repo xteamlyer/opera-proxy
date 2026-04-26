@@ -1,4 +1,4 @@
-module github.com/Alexey71/opera-proxy
+module github.com/xteamlyer/opera-proxy
 
 go 1.25.0
 
