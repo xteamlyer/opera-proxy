@@ -10,7 +10,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
@@ -23,12 +22,12 @@ import (
 
 	xproxy "golang.org/x/net/proxy"
 
-	"github.com/Alexey71/opera-proxy/clock"
-	"github.com/Alexey71/opera-proxy/dialer"
-	"github.com/Alexey71/opera-proxy/handler"
-	clog "github.com/Alexey71/opera-proxy/log"
-	"github.com/Alexey71/opera-proxy/resolver"
-	se "github.com/Alexey71/opera-proxy/seclient"
+	"github.com/xteamlyer/opera-proxy/clock"
+	"github.com/xteamlyer/opera-proxy/dialer"
+	"github.com/xteamlyer/opera-proxy/handler"
+	clog "github.com/xteamlyer/opera-proxy/log"
+	"github.com/xteamlyer/opera-proxy/resolver"
+	se "github.com/xteamlyer/opera-proxy/seclient"
 
 	_ "golang.org/x/crypto/x509roots/fallback"
 	"golang.org/x/crypto/x509roots/fallback/bundle"
@@ -37,6 +36,15 @@ import (
 const (
 	API_DOMAIN   = "api2.sec-tunnel.com"
 	PROXY_SUFFIX = "sec-tunnel.com"
+
+	// Default timeouts increased to reduce premature API errors on slow networks.
+	DEFAULT_TIMEOUT                  = 30 * time.Second
+	DEFAULT_SERVER_SELECTION_TIMEOUT = 60 * time.Second
+
+	// Reduced idle connection pool to lower resource usage on embedded/low-RAM hosts.
+	HTTP_MAX_IDLE_CONNS          = 10
+	HTTP_MAX_IDLE_CONNS_PER_HOST = 3
+	HTTP_IDLE_CONN_TIMEOUT       = 60 * time.Second
 )
 
 func perror(msg string) {
@@ -125,6 +133,8 @@ type CLIArgs struct {
 	caFile                 string
 	fakeSNI                string
 	overrideProxyAddress   string
+	proxyBypass            []string
+	proxyBypassFile        string
 	serverSelection        serverSelectionArg
 	serverSelectionTimeout time.Duration
 	serverSelectionTestURL string
@@ -155,8 +165,9 @@ func parse_args() *CLIArgs {
 	flag.StringVar(&args.bindAddress, "bind-address", "127.0.0.1:18080", "proxy listen address")
 	flag.BoolVar(&args.socksMode, "socks-mode", false, "listen for SOCKS requests instead of HTTP")
 	flag.IntVar(&args.verbosity, "verbosity", 20, "logging verbosity "+
-		"(10 - debug, 20 - info, 30 - warning, 40 - error, 50 - critical)")
-	flag.DurationVar(&args.timeout, "timeout", 10*time.Second, "timeout for network operations")
+		"(10 - debug, 20 - info, 30 - warning, 40 - error, 50 - critical, 60 - silent)")
+	flag.DurationVar(&args.timeout, "timeout", DEFAULT_TIMEOUT,
+		"timeout for network operations")
 	flag.BoolVar(&args.showVersion, "version", false, "show program version and exit")
 	flag.StringVar(&args.proxy, "proxy", "", "sets base proxy to use for all dial-outs. "+
 		"Format: <http|https|socks5|socks5h>://[login:password@]host[:port] "+
@@ -179,11 +190,26 @@ func parse_args() *CLIArgs {
 	flag.StringVar(&args.caFile, "cafile", "", "use custom CA certificate bundle file")
 	flag.StringVar(&args.fakeSNI, "fake-SNI", "", "domain name to use as SNI in communications with servers")
 	flag.StringVar(&args.overrideProxyAddress, "override-proxy-address", "", "use fixed proxy address instead of server address returned by SurfEasy API")
+	flag.StringVar(&args.proxyBypassFile, "proxy-bypass-file", "", "path to file with bypass patterns, one per line (comments with #)")
+	flag.Func("proxy-bypass", "comma-separated bypass patterns; matched addresses connect directly.\n"+
+		"Formats: hostname (example.com), wildcard (*.example.com), IP (1.2.3.4), CIDR (10.0.0.0/8), any with optional :port suffix",
+		func(s string) error {
+			for _, part := range strings.Split(s, ",") {
+				part = strings.TrimSpace(part)
+				if part != "" {
+					args.proxyBypass = append(args.proxyBypass, part)
+				}
+			}
+			return nil
+		})
 	flag.Var(&args.serverSelection, "server-selection", "server selection policy (first/random/fastest)")
-	flag.DurationVar(&args.serverSelectionTimeout, "server-selection-timeout", 30*time.Second, "timeout given for server selection function to produce result")
-	flag.StringVar(&args.serverSelectionTestURL, "server-selection-test-url", "https://ajax.googleapis.com/ajax/libs/angularjs/1.8.2/angular.min.js",
+	flag.DurationVar(&args.serverSelectionTimeout, "server-selection-timeout", DEFAULT_SERVER_SELECTION_TIMEOUT,
+		"timeout given for server selection function to produce result")
+	flag.StringVar(&args.serverSelectionTestURL, "server-selection-test-url",
+		"https://ajax.googleapis.com/ajax/libs/angularjs/1.8.2/angular.min.js",
 		"URL used for download benchmark by fastest server selection policy")
-	flag.Int64Var(&args.serverSelectionDLLimit, "server-selection-dl-limit", 0, "restrict amount of downloaded data per connection by fastest server selection")
+	flag.Int64Var(&args.serverSelectionDLLimit, "server-selection-dl-limit", 0,
+		"restrict amount of downloaded data per connection by fastest server selection")
 	flag.Func("config", "read configuration from file with space-separated keys and values", readConfig)
 	flag.Parse()
 	if args.country == "" {
@@ -204,6 +230,58 @@ func proxyFromURLWrapper(u *url.URL, next xproxy.Dialer) (xproxy.Dialer, error) 
 	return dialer.ProxyDialerFromURL(u, cdialer)
 }
 
+// buildAPITransport returns an http.Transport tuned for infrequent API calls:
+// reduced idle pool (saves goroutines/sockets), no forced HTTP/2.
+func buildAPITransport(
+	dialCtx func(context.Context, string, string) (net.Conn, error),
+	dialTLSCtx func(context.Context, string, string) (net.Conn, error),
+) *http.Transport {
+	return &http.Transport{
+		DialContext:           dialCtx,
+		DialTLSContext:        dialTLSCtx,
+		ForceAttemptHTTP2:     false,
+		MaxIdleConns:          HTTP_MAX_IDLE_CONNS,
+		MaxIdleConnsPerHost:   HTTP_MAX_IDLE_CONNS_PER_HOST,
+		IdleConnTimeout:       HTTP_IDLE_CONN_TIMEOUT,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+}
+
+// buildCAPool constructs the x509 cert pool used for all TLS verification.
+// When -cafile is given, only that file is loaded (useful for custom/corporate CAs).
+// Otherwise the bundled Mozilla NSS root store is used, which includes all
+// major roots and supports AddCertWithConstraint for name-constrained CAs —
+// strictly better than a plain PEM file.
+func buildCAPool(caFile string, logger *clog.CondLogger) (*x509.CertPool, int) {
+	pool := x509.NewCertPool()
+	if caFile != "" {
+		certs, err := os.ReadFile(caFile)
+		if err != nil {
+			logger.Error("Can't load CA file: %v", err)
+			return nil, 15
+		}
+		if ok := pool.AppendCertsFromPEM(certs); !ok {
+			logger.Error("Can't load certificates from CA file")
+			return nil, 15
+		}
+		return pool, 0
+	}
+	for c := range bundle.Roots() {
+		cert, err := x509.ParseCertificate(c.Certificate)
+		if err != nil {
+			logger.Error("Unable to parse bundled certificate: %v", err)
+			return nil, 15
+		}
+		if c.Constraint == nil {
+			pool.AddCert(cert)
+		} else {
+			pool.AddCertWithConstraint(cert, c.Constraint)
+		}
+	}
+	return pool, 0
+}
+
 func run() int {
 	args := parse_args()
 	if args.showVersion {
@@ -220,7 +298,14 @@ func run() int {
 	proxyLogger := clog.NewCondLogger(log.New(logWriter, "PROXY   : ",
 		log.LstdFlags|log.Lshortfile),
 		args.verbosity)
-	socksLogger := log.New(logWriter, "SOCKS   : ",
+	// When verbosity >= SILENT, discard socks5 library logs entirely.
+	// go-socks5 writes through a raw *log.Logger which bypasses CondLogger,
+	// so we swap the writer to io.Discard to guarantee silence.
+	socksLogWriter := io.Writer(logWriter)
+	if args.verbosity >= clog.SILENT {
+		socksLogWriter = io.Discard
+	}
+	socksLogger := log.New(socksLogWriter, "SOCKS   : ",
 		log.LstdFlags|log.Lshortfile)
 
 	mainLogger.Info("opera-proxy client version %s is starting...", version())
@@ -229,31 +314,14 @@ func run() int {
 		Timeout:   30 * time.Second,
 		KeepAlive: 30 * time.Second,
 	}
+	// rawDialer is the bare net.Dialer before any -proxy wrapping.
+	// BypassDialer uses this as directDialer so that bypassed connections
+	// genuinely go direct — not through the base proxy.
+	rawDialer := d
 
-	caPool := x509.NewCertPool()
-	if args.caFile != "" {
-		certs, err := ioutil.ReadFile(args.caFile)
-		if err != nil {
-			mainLogger.Error("Can't load CA file: %v", err)
-			return 15
-		}
-		if ok := caPool.AppendCertsFromPEM(certs); !ok {
-			mainLogger.Error("Can't load certificates from CA file")
-			return 15
-		}
-	} else {
-		for c := range bundle.Roots() {
-			cert, err := x509.ParseCertificate(c.Certificate)
-			if err != nil {
-				mainLogger.Error("Unable to parse bundled certificate: %v", err)
-				return 15
-			}
-			if c.Constraint == nil {
-				caPool.AddCert(cert)
-			} else {
-				caPool.AddCertWithConstraint(cert, c.Constraint)
-			}
-		}
+	caPool, exitCode := buildCAPool(args.caFile, mainLogger)
+	if exitCode != 0 {
+		return exitCode
 	}
 
 	xproxy.RegisterDialerType("http", proxyFromURLWrapper)
@@ -276,12 +344,12 @@ func run() int {
 	if args.apiProxy != "" {
 		apiProxyURL, err := url.Parse(args.apiProxy)
 		if err != nil {
-			mainLogger.Critical("Unable to parse base proxy URL: %v", err)
+			mainLogger.Critical("Unable to parse api-proxy URL: %v", err)
 			return 6
 		}
 		pxDialer, err := xproxy.FromURL(apiProxyURL, seclientDialer)
 		if err != nil {
-			mainLogger.Critical("Unable to instantiate base proxy dialer: %v", err)
+			mainLogger.Critical("Unable to instantiate api-proxy dialer: %v", err)
 			return 7
 		}
 		seclientDialer = pxDialer.(dialer.ContextDialer)
@@ -290,35 +358,33 @@ func run() int {
 		mainLogger.Info("Using fixed API host address = %s", args.apiAddress)
 		seclientDialer = dialer.NewFixedDialer(args.apiAddress, seclientDialer)
 	} else if len(args.bootstrapDNS.values) > 0 {
-		resolver, err := resolver.FastFromURLs(caPool, args.bootstrapDNS.values...)
+		res, err := resolver.FastFromURLs(caPool, args.bootstrapDNS.values...)
 		if err != nil {
 			mainLogger.Critical("Unable to instantiate DNS resolver: %v", err)
 			return 4
 		}
-		seclientDialer = dialer.NewResolvingDialer(resolver, seclientDialer)
+		seclientDialer = dialer.NewResolvingDialer(res, seclientDialer)
 	}
 
-	// Dialing w/o SNI, receiving self-signed certificate, so skip verification.
-	// Either way we'll validate certificate of actual proxy server.
+	// TLS config for the API connection: SNI suppressed (or faked), cert
+	// verification is skipped at the TLS layer because the API endpoint uses
+	// a self-signed cert — actual peer verification happens in VerifyConnection
+	// inside ProxyDialer for the proxy connections.
 	tlsConfig := &tls.Config{
 		ServerName:         args.fakeSNI,
 		InsecureSkipVerify: true,
 	}
-	seclient, err := se.NewSEClient(args.apiLogin, args.apiPassword, &http.Transport{
-		DialContext: seclientDialer.DialContext,
-		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+
+	seclient, err := se.NewSEClient(args.apiLogin, args.apiPassword, buildAPITransport(
+		seclientDialer.DialContext,
+		func(ctx context.Context, network, addr string) (net.Conn, error) {
 			conn, err := seclientDialer.DialContext(ctx, network, addr)
 			if err != nil {
 				return conn, err
 			}
 			return tls.Client(conn, tlsConfig), nil
 		},
-		ForceAttemptHTTP2:     true,
-		MaxIdleConns:          100,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
-	})
+	))
 	if err != nil {
 		mainLogger.Critical("Unable to construct SEClient: %v", err)
 		return 8
@@ -413,9 +479,7 @@ func run() int {
 				ss = dialer.NewFastestServerSelectionFunc(
 					args.serverSelectionTestURL,
 					args.serverSelectionDLLimit,
-					&tls.Config{
-						RootCAs: caPool,
-					},
+					&tls.Config{RootCAs: caPool},
 				)
 			default:
 				panic("unhandled server selection value got past parsing")
@@ -446,12 +510,38 @@ func run() int {
 		mainLogger.Info("Endpoint override: %s", sanitizedEndpoint)
 	}
 
+	// Load bypass patterns from file if specified.
+	if args.proxyBypassFile != "" {
+		filePatterns, err := dialer.LoadBypassFile(args.proxyBypassFile)
+		if err != nil {
+			mainLogger.Critical("Unable to load bypass file: %v", err)
+			return 13
+		}
+		args.proxyBypass = append(args.proxyBypass, filePatterns...)
+	}
+	if len(args.proxyBypass) > 0 {
+		mainLogger.Info("Bypass rules (%d): %v", len(args.proxyBypass), args.proxyBypass)
+		bypassDialer, err := dialer.NewBypassDialer(args.proxyBypass, rawDialer, handlerDialer, mainLogger)
+		if err != nil {
+			mainLogger.Critical("Unable to configure bypass rules: %v", err)
+			return 13
+		}
+		// Pre-resolve hostname/wildcard patterns to IPs so that bypass works
+		// even when the SOCKS5 client resolves DNS itself and sends IP addresses.
+		// 20s timeout: Android may take longer to get network ready at daemon startup.
+		// nil resolver = net.DefaultResolver; on Android with CGO=0 this may fail
+		// for some patterns — those will still match by hostname if client sends SOCKS5h.
+		resolveCtx, resolveCancel := context.WithTimeout(context.Background(), 20*time.Second)
+		bypassDialer.ResolvePatterns(resolveCtx, nil)
+		resolveCancel()
+		handlerDialer = bypassDialer
+	}
+
 	clock.RunTicker(context.Background(), args.refresh, args.refreshRetry, func(ctx context.Context) error {
 		mainLogger.Info("Refreshing login...")
 		reqCtx, cl := context.WithTimeout(ctx, args.timeout)
 		defer cl()
-		err := seclient.Login(reqCtx)
-		if err != nil {
+		if err := seclient.Login(reqCtx); err != nil {
 			mainLogger.Error("Login refresh failed: %v", err)
 			return err
 		}
@@ -460,8 +550,7 @@ func run() int {
 		mainLogger.Info("Refreshing device password...")
 		reqCtx, cl = context.WithTimeout(ctx, args.timeout)
 		defer cl()
-		err = seclient.DeviceGeneratePassword(reqCtx)
-		if err != nil {
+		if err := seclient.DeviceGeneratePassword(reqCtx); err != nil {
 			mainLogger.Error("Device password refresh failed: %v", err)
 			return err
 		}
@@ -473,7 +562,7 @@ func run() int {
 	if args.socksMode {
 		socks, initError := handler.NewSocksServer(handlerDialer, socksLogger)
 		if initError != nil {
-			mainLogger.Critical("Failed to start: %v", err)
+			mainLogger.Critical("Failed to start: %v", initError)
 			return 16
 		}
 		mainLogger.Info("Init complete.")
@@ -500,7 +589,6 @@ func printCountries(try func(string, func() error) error, logger *clog.CondLogge
 	if err != nil {
 		return 11
 	}
-
 	wr := csv.NewWriter(os.Stdout)
 	defer wr.Flush()
 	wr.Write([]string{"country code", "country name"})
@@ -544,10 +632,7 @@ func dpExport(ips []se.SEIPEntry, seclient *se.SEClient, sni string) int {
 		u := url.URL{
 			Scheme: "https",
 			User:   creds,
-			Host: net.JoinHostPort(
-				ip.IP,
-				strconv.Itoa(int(ip.Ports[0])),
-			),
+			Host:   net.JoinHostPort(ip.IP, strconv.Itoa(int(ip.Ports[0]))),
 			RawQuery: url.Values{
 				"sni":      []string{sni},
 				"peername": []string{fmt.Sprintf("%s%d.%s", strings.ToLower(ip.Geo.CountryCode), i, PROXY_SUFFIX)},
@@ -557,10 +642,7 @@ func dpExport(ips []se.SEIPEntry, seclient *se.SEClient, sni string) int {
 		if gotOne {
 			key = "#proxy"
 		}
-		wr.Write([]string{
-			key,
-			u.String(),
-		})
+		wr.Write([]string{key, u.String()})
 		gotOne = true
 	}
 	return 0
