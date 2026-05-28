@@ -701,7 +701,11 @@ func run() int {
 	proxyLogger := clog.NewCondLogger(log.New(logWriter, "PROXY   : ",
 		log.LstdFlags|log.Lshortfile),
 		args.verbosity)
-	socksLogger := log.New(logWriter, "SOCKS   : ",
+	socksLogDst := io.Writer(logWriter)
+	if args.verbosity >= clog.SILENT {
+		socksLogDst = io.Discard
+	}
+	socksLogger := log.New(socksLogDst, "SOCKS   : ",
 		log.LstdFlags|log.Lshortfile)
 
 	mainLogger.Info("opera-proxy client version %s is starting...", version())
