@@ -6,6 +6,9 @@ import (
 )
 
 const (
+	// SILENT completely suppresses all output, including errors from third-party libraries.
+	// Pass -verbosity 60 to enable.
+	SILENT   = 60
 	CRITICAL = 50
 	ERROR    = 40
 	WARNING  = 30
@@ -19,7 +22,12 @@ type CondLogger struct {
 	verbosity int
 }
 
+// Log writes a message at the given verbosity level.
+// If the current verbosity is >= SILENT, nothing is written.
 func (cl *CondLogger) Log(verb int, format string, v ...interface{}) error {
+	if cl.verbosity >= SILENT {
+		return nil
+	}
 	if verb >= cl.verbosity {
 		return cl.logger.Output(2, fmt.Sprintf(format, v...))
 	}
@@ -27,6 +35,9 @@ func (cl *CondLogger) Log(verb int, format string, v ...interface{}) error {
 }
 
 func (cl *CondLogger) log(verb int, format string, v ...interface{}) error {
+	if cl.verbosity >= SILENT {
+		return nil
+	}
 	if verb >= cl.verbosity {
 		return cl.logger.Output(3, fmt.Sprintf(format, v...))
 	}
@@ -51,6 +62,11 @@ func (cl *CondLogger) Info(s string, v ...interface{}) error {
 
 func (cl *CondLogger) Debug(s string, v ...interface{}) error {
 	return cl.log(DEBUG, "DEBUG    "+s, v...)
+}
+
+// IsSilent returns true when all output should be suppressed (verbosity >= SILENT).
+func (cl *CondLogger) IsSilent() bool {
+	return cl.verbosity >= SILENT
 }
 
 func NewCondLogger(logger *log.Logger, verbosity int) *CondLogger {

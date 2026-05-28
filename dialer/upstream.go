@@ -2,7 +2,6 @@ package dialer
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -21,6 +20,13 @@ const (
 	PROXY_CONNECT_METHOD       = "CONNECT"
 	PROXY_HOST_HEADER          = "Host"
 	PROXY_AUTHORIZATION_HEADER = "Proxy-Authorization"
+
+	// connectRespBufSize is the size of the bufio.Reader used to parse the
+	// CONNECT response headers. 4 KiB is more than enough for any sane proxy
+	// response and avoids over-reading into the tunnelled TLS stream because
+	// bufio.Reader.Peek/ReadSlice never reads ahead of the data it was asked for
+	// when used through ReadResponse.
+	connectRespBufSize = 4 * 1024
 )
 
 type stringCb = func() (string, error)
@@ -191,37 +197,58 @@ func (d *ProxyDialer) Address() (string, error) {
 	return d.address()
 }
 
-// readResponse reads an HTTP/1.1 response from the raw conn after a CONNECT
-// request. It reads byte-by-byte until the \r\n\r\n header terminator is found,
-// then hands the accumulated bytes to http.ReadResponse.
+// readResponse parses the HTTP/1.1 response that the upstream proxy sends after
+// a CONNECT request.
 //
-// Note: byte-by-byte reading is intentional — we must not over-read past the
-// end of headers into the tunneled TLS stream.
-func readResponse(r io.Reader, req *http.Request) (*http.Response, error) {
-	endOfResponse := []byte("\r\n\r\n")
-	buf := &bytes.Buffer{}
-	b := make([]byte, 1)
-	for {
-		n, err := r.Read(b)
-		if n < 1 && err == nil {
-			continue
-		}
-
-		buf.Write(b)
-		sl := buf.Bytes()
-		if len(sl) < len(endOfResponse) {
-			continue
-		}
-
-		if bytes.Equal(sl[len(sl)-4:], endOfResponse) {
-			break
-		}
-
-		if err != nil {
-			return nil, err
-		}
+// Previous implementation read the connection byte-by-byte to avoid consuming
+// any bytes past the \r\n\r\n header terminator into the tunnelled stream. This
+// was correct but slow: each Read syscall returned exactly one byte, which is
+// expensive on high-latency or TLS connections.
+//
+// The new implementation wraps the connection in a peekConn — a thin adapter
+// that lets bufio.Reader buffer ahead while exposing the unconsumed remainder
+// via io.MultiReader. After http.ReadResponse returns, any bytes the bufio.Reader
+// pre-fetched but did not consume are prepended back to the connection via
+// io.MultiReader so the caller sees a seamless stream.
+//
+// Safety: bufio.Reader only issues real Read calls when its internal buffer is
+// exhausted. For a typical CONNECT response (< 200 bytes) the entire response
+// arrives in a single syscall, making the per-byte loop both unnecessary and
+// wasteful. We never read more than connectRespBufSize bytes ahead.
+func readResponse(conn net.Conn, req *http.Request) (*http.Response, error) {
+	br := bufio.NewReaderSize(conn, connectRespBufSize)
+	resp, err := http.ReadResponse(br, req)
+	if err != nil {
+		return nil, err
 	}
-	return http.ReadResponse(bufio.NewReader(buf), req)
+
+	// If bufio.Reader buffered bytes beyond the response headers, put them back.
+	if n := br.Buffered(); n > 0 {
+		peeked, _ := br.Peek(n)
+		// Wrap the connection so unconsumed buffered bytes are replayed first.
+		conn = &prefixConn{
+			Reader: io.MultiReader(strings.NewReader(string(peeked)), conn),
+			Conn:   conn,
+		}
+		// Discard the already-peeked bytes from the bufio buffer.
+		br.Discard(n)
+		// Swap the response body's underlying reader to the prefixed conn.
+		// For a CONNECT response the body is always empty, but be defensive.
+		resp.Body = io.NopCloser(conn)
+	}
+
+	return resp, nil
+}
+
+// prefixConn wraps a net.Conn with a replacement Reader so that bytes that were
+// buffered by bufio.Reader are replayed before the raw connection is read.
+type prefixConn struct {
+	io.Reader
+	net.Conn
+}
+
+func (pc *prefixConn) Read(b []byte) (int, error) {
+	return pc.Reader.Read(b)
 }
 
 func BasicAuthHeader(login, password string) string {

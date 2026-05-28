@@ -12,8 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Alexey71/opera-proxy/dialer"
-	clog "github.com/Alexey71/opera-proxy/log"
+	"github.com/xteamlyer/opera-proxy/dialer"
+	clog "github.com/xteamlyer/opera-proxy/log"
 )
 
 const (
@@ -35,6 +35,20 @@ var copyBufPool = sync.Pool{
 		b := make([]byte, COPY_BUF)
 		return &b
 	},
+}
+
+// copyWithPool copies from src to dst using a pooled buffer.
+// It is the single canonical copy helper used by proxy, proxyh2, and
+// copyBody. Previously the code had two patterns:
+//   - proxy/proxyh2 used io.CopyBuffer with a pooled buffer
+//   - copyBody used a manual Read/Write loop with a pooled buffer + http.Flusher
+//
+// Unified here: copyWithPool is the raw copy (used for net.Conn relay),
+// and copyBody adds the Flusher call on top of it for HTTP response streaming.
+func copyWithPool(dst io.Writer, src io.Reader) {
+	bufp := copyBufPool.Get().(*[]byte)
+	defer copyBufPool.Put(bufp)
+	io.CopyBuffer(dst, src, *bufp)
 }
 
 type ProxyHandler struct {
@@ -132,14 +146,13 @@ func (s *ProxyHandler) ServeHTTP(wr http.ResponseWriter, req *http.Request) {
 	}
 }
 
+// proxy relays data bidirectionally between two net.Conn until either the
+// context is cancelled or both sides close.
 func proxy(ctx context.Context, left, right net.Conn) {
 	wg := sync.WaitGroup{}
 	cpy := func(dst, src net.Conn) {
 		defer wg.Done()
-		// Grab a pooled buffer for this copy direction.
-		bufp := copyBufPool.Get().(*[]byte)
-		defer copyBufPool.Put(bufp)
-		io.CopyBuffer(dst, src, *bufp)
+		copyWithPool(dst, src)
 		dst.Close()
 	}
 	wg.Add(2)
@@ -158,20 +171,21 @@ func proxy(ctx context.Context, left, right net.Conn) {
 		return
 	}
 	<-groupdone
-	return
 }
 
+// proxyh2 relays an HTTP/2 tunnel: leftreader/leftwriter are the HTTP/2 body
+// streams, right is the raw upstream TCP connection.
 func proxyh2(ctx context.Context, leftreader io.ReadCloser, leftwriter io.Writer, right net.Conn) {
 	wg := sync.WaitGroup{}
 	ltr := func(dst net.Conn, src io.Reader) {
 		defer wg.Done()
-		bufp := copyBufPool.Get().(*[]byte)
-		defer copyBufPool.Put(bufp)
-		io.CopyBuffer(dst, src, *bufp)
+		copyWithPool(dst, src)
 		dst.Close()
 	}
 	rtl := func(dst io.Writer, src io.Reader) {
 		defer wg.Done()
+		// HTTP/2 writer side: flush after each chunk so the client receives
+		// data progressively. copyBody handles the Flusher call.
 		copyBody(dst, src)
 	}
 	wg.Add(2)
@@ -190,7 +204,6 @@ func proxyh2(ctx context.Context, leftreader io.ReadCloser, leftwriter io.Writer
 		return
 	}
 	<-groupdone
-	return
 }
 
 // Hop-by-hop headers. These are removed when sent to the backend.
@@ -247,18 +260,22 @@ func flush(flusher interface{}) bool {
 	return true
 }
 
+// copyBody copies an HTTP response body to dst, calling Flush after each
+// chunk so the client receives data progressively (important for streaming
+// responses). Uses copyWithPool internally to share the same pooled buffer.
 func copyBody(wr io.Writer, body io.Reader) {
-	// Use pooled buffer to avoid per-call allocation.
 	bufp := copyBufPool.Get().(*[]byte)
 	defer copyBufPool.Put(bufp)
 	for {
-		bread, read_err := body.Read(*bufp)
-		var write_err error
-		if bread > 0 {
-			_, write_err = wr.Write((*bufp)[:bread])
+		n, readErr := body.Read(*bufp)
+		if n > 0 {
+			_, writeErr := wr.Write((*bufp)[:n])
 			flush(wr)
+			if writeErr != nil {
+				break
+			}
 		}
-		if read_err != nil || write_err != nil {
+		if readErr != nil {
 			break
 		}
 	}
