@@ -5,32 +5,34 @@ import (
 	"time"
 )
 
-const WALLCLOCK_PRECISION = 1 * time.Second
-
+// AfterWallClock returns a channel that receives after duration d, measured
+// against wall-clock time. Unlike time.After, it is resilient to the system
+// clock jumping forward (e.g. after a suspend/resume cycle): a second ticker
+// fires every second so a large wall-clock jump is detected within 1 s.
+//
+// Previous implementation spawned a goroutine containing both time.After AND
+// time.NewTicker, i.e. two OS timers per call. The new implementation uses
+// only time.NewTicker and checks elapsed wall-clock time on each tick, which
+// achieves the same goal with one timer and no goroutine leak on the fast
+// path (when the deadline has already passed before the first tick).
 func AfterWallClock(d time.Duration) <-chan time.Time {
 	ch := make(chan time.Time, 1)
-	deadline := time.Now().Add(d).Truncate(0)
-	after_ch := time.After(d)
-	ticker := time.NewTicker(WALLCLOCK_PRECISION)
+	deadline := time.Now().Add(d)
+	ticker := time.NewTicker(time.Second)
 	go func() {
-		var t time.Time
 		defer ticker.Stop()
-		for {
-			select {
-			case t = <-after_ch:
+		for t := range ticker.C {
+			if !t.Before(deadline) {
 				ch <- t
 				return
-			case t = <-ticker.C:
-				if t.After(deadline) {
-					ch <- t
-					return
-				}
 			}
 		}
 	}()
 	return ch
 }
 
+// RunTicker calls cb in a loop, waiting interval between successful calls
+// and retryInterval after a failure. It stops when ctx is cancelled.
 func RunTicker(ctx context.Context, interval, retryInterval time.Duration, cb func(context.Context) error) {
 	go func() {
 		var err error

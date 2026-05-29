@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"math/rand"
 	"net/http"
 	"net/url"
 	"strings"
@@ -15,10 +14,10 @@ import (
 )
 
 const (
-	ANON_EMAIL_LOCALPART_BYTES = 32
-	ANON_PASSWORD_BYTES        = 20
-	DEVICE_ID_BYTES            = 20
-	READ_LIMIT           int64 = 128 * 1024
+	ANON_EMAIL_LOCALPART_BYTES       = 32
+	ANON_PASSWORD_BYTES              = 20
+	DEVICE_ID_BYTES                  = 20
+	READ_LIMIT                 int64 = 128 * 1024
 )
 
 type SEEndpoints struct {
@@ -67,7 +66,6 @@ type SEClient struct {
 	AssignedDeviceIDHash string
 	DevicePassword       string
 	Mux                  sync.Mutex
-	rng                  *rand.Rand
 }
 
 type StrKV map[string]string
@@ -81,9 +79,7 @@ func NewSEClient(apiUsername, apiSecret string, transport http.RoundTripper) (*S
 		transport = http.DefaultTransport
 	}
 
-	rng := rand.New(RandomSource)
-
-	deviceID, err := randomCapitalHexString(rng, DEVICE_ID_BYTES)
+	deviceID, err := randomCapitalHexString(DEVICE_ID_BYTES)
 	if err != nil {
 		return nil, err
 	}
@@ -99,7 +95,6 @@ func NewSEClient(apiUsername, apiSecret string, transport http.RoundTripper) (*S
 			Transport: dac.NewDigestTransport(apiUsername, apiSecret, transport),
 		},
 		Settings: DefaultSESettings,
-		rng:      rng,
 		DeviceID: deviceID,
 	}, nil
 }
@@ -118,7 +113,7 @@ func (c *SEClient) AnonRegister(ctx context.Context) error {
 	c.Mux.Lock()
 	defer c.Mux.Unlock()
 
-	localPart, err := randomEmailLocalPart(c.rng)
+	localPart, err := randomEmailLocalPart()
 	if err != nil {
 		return err
 	}

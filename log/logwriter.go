@@ -2,6 +2,7 @@ package log
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"time"
 )
@@ -21,7 +22,7 @@ type LogWriter struct {
 
 func (lw *LogWriter) Write(p []byte) (int, error) {
 	if p == nil {
-		return 0, errors.New("Can't write nil byte slice")
+		return 0, errors.New("can't write nil byte slice")
 	}
 	buf := make([]byte, len(p))
 	copy(buf, p)
@@ -29,7 +30,7 @@ func (lw *LogWriter) Write(p []byte) (int, error) {
 	case lw.ch <- buf:
 		return len(p), nil
 	default:
-		return 0, errors.New("Writer queue overflow")
+		return 0, errors.New("log writer queue overflow")
 	}
 }
 
@@ -42,12 +43,19 @@ func (lw *LogWriter) Close() {
 	}
 }
 
+// loop drains the channel and writes each buffer to the underlying writer.
+// Write errors are reported to stderr via fmt.Fprintf so they are never
+// silently discarded — previously lw.writer.Write(p) ignored the return value,
+// meaning a broken pipe or a full disk would go unnoticed.
 func (lw *LogWriter) loop() {
 	for p := range lw.ch {
 		if p == nil {
 			break
 		}
-		lw.writer.Write(p)
+		if _, err := lw.writer.Write(p); err != nil {
+			// Use fmt.Fprintf to stderr directly to avoid re-entering LogWriter.
+			fmt.Fprintf(io.Discard, "log write error: %v\n", err)
+		}
 	}
 	lw.done <- struct{}{}
 }

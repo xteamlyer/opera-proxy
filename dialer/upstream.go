@@ -183,7 +183,7 @@ func (d *ProxyDialer) DialContext(ctx context.Context, network, address string) 
 	}
 
 	if proxyResp.StatusCode != http.StatusOK {
-		return nil, errors.New(fmt.Sprintf("bad response from upstream proxy server: %s", proxyResp.Status))
+		return nil, fmt.Errorf("bad response from upstream proxy server: %s", proxyResp.Status)
 	}
 
 	return conn, nil

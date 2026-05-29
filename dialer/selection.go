@@ -5,11 +5,8 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"io"
 	"math/rand/v2"
-	"net/http"
 	"strings"
-	"time"
 
 	"github.com/Alexey71/go-multierror"
 )
@@ -64,36 +61,10 @@ func SelectRandom(_ context.Context, dialers []ContextDialer) (ContextDialer, er
 	return dialers[rand.IntN(len(dialers))], nil
 }
 
-func probeDialer(ctx context.Context, dialer ContextDialer, url string, dlLimit int64, tlsClientConfig *tls.Config) error {
-	httpClient := http.Client{
-		Transport: &http.Transport{
-			MaxIdleConns:          100,
-			IdleConnTimeout:       90 * time.Second,
-			TLSHandshakeTimeout:   10 * time.Second,
-			ExpectContinueTimeout: 1 * time.Second,
-			DialContext:           dialer.DialContext,
-			TLSClientConfig:       tlsClientConfig,
-			ForceAttemptHTTP2:     true,
-		},
-	}
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return err
-	}
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("bad status code %d for URL %q", resp.StatusCode, url)
-	}
-	var rd io.Reader = resp.Body
-	if dlLimit > 0 {
-		rd = io.LimitReader(rd, dlLimit)
-	}
-	_, err = io.Copy(io.Discard, rd)
-	return err
+// probeDialer delegates to ProbeDialer (dialer/probe.go) so the selection
+// logic does not duplicate the HTTP probe implementation.
+func probeDialer(ctx context.Context, d ContextDialer, url string, dlLimit int64, tlsClientConfig *tls.Config) error {
+	return ProbeDialer(ctx, d, url, dlLimit, tlsClientConfig)
 }
 
 func NewFastestServerSelectionFunc(url string, dlLimit int64, tlsClientConfig *tls.Config) SelectionFunc {

@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -14,13 +15,16 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
+	"os/signal"
 	"runtime/debug"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	xproxy "golang.org/x/net/proxy"
@@ -50,6 +54,17 @@ const (
 	HTTP_MAX_IDLE_CONNS          = 10
 	HTTP_MAX_IDLE_CONNS_PER_HOST = 3
 	HTTP_IDLE_CONN_TIMEOUT       = 60 * time.Second
+
+	// SE_* constants apply to the SurfEasy API transport and the speed-probe transport.
+	// They allow more concurrent connections than the proxy handler transport because
+	// API calls are short-lived and few (dozens, not thousands).
+	SE_MAX_IDLE_CONNS          = 100
+	SE_IDLE_CONN_TIMEOUT       = 90 * time.Second
+	SE_TLS_HANDSHAKE_TIMEOUT   = 10 * time.Second
+	SE_EXPECT_CONTINUE_TIMEOUT = 1 * time.Second
+
+	// BENCH_WORKERS is the maximum number of concurrent speed-probe goroutines.
+	BENCH_WORKERS = 8
 )
 
 func perror(msg string) {
@@ -195,7 +210,7 @@ func parse_args() *CLIArgs {
 	flag.StringVar(&args.bindAddress, "bind-address", "127.0.0.1:18080", "proxy listen address")
 	flag.BoolVar(&args.socksMode, "socks-mode", false, "listen for SOCKS requests instead of HTTP")
 	flag.IntVar(&args.verbosity, "verbosity", 20, "logging verbosity "+
-		"(10 - debug, 20 - info, 30 - warning, 40 - error, 50 - critical)")
+		"(10 - debug, 20 - info, 30 - warning, 40 - error, 50 - critical, 60 - silent/no output at all)")
 	flag.DurationVar(&args.timeout, "timeout", DEFAULT_TIMEOUT,
 		"timeout for network operations")
 	flag.BoolVar(&args.showVersion, "version", false, "show program version and exit")
@@ -306,6 +321,28 @@ func buildAPITransport(
 	}
 }
 
+// buildSETransport returns an *http.Transport configured for SurfEasy API calls
+// and speed probes. All SE transports share the same constants (SE_MAX_IDLE_CONNS,
+// SE_IDLE_CONN_TIMEOUT, etc.) so there is a single definition instead of four.
+//
+// dialCtx is mandatory. dialTLSCtx is optional: pass nil to use Go's default TLS
+// dialer (standard certificate verification). The caller may overwrite individual
+// fields (e.g. TLSClientConfig) after calling buildSETransport.
+func buildSETransport(
+	dialCtx func(context.Context, string, string) (net.Conn, error),
+	dialTLSCtx func(context.Context, string, string) (net.Conn, error),
+) *http.Transport {
+	return &http.Transport{
+		DialContext:           dialCtx,
+		DialTLSContext:        dialTLSCtx,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          SE_MAX_IDLE_CONNS,
+		IdleConnTimeout:       SE_IDLE_CONN_TIMEOUT,
+		TLSHandshakeTimeout:   SE_TLS_HANDSHAKE_TIMEOUT,
+		ExpectContinueTimeout: SE_EXPECT_CONTINUE_TIMEOUT,
+	}
+}
+
 // buildCAPool constructs the x509 cert pool used for all TLS verification.
 // When -cafile is given, only that file is loaded (useful for custom/corporate CAs).
 // Otherwise the bundled Mozilla NSS root store is used, which includes all
@@ -381,6 +418,15 @@ func normalizeAPIProxy(raw string) (string, error) {
 	return "", fmt.Errorf("unsupported proxy entry format %q", raw)
 }
 
+// stripComment strips an inline # comment from a config-file line and
+// trims surrounding whitespace. Returns an empty string for blank/comment-only lines.
+func stripComment(line string) string {
+	if idx := strings.Index(line, "#"); idx >= 0 {
+		line = line[:idx]
+	}
+	return strings.TrimSpace(line)
+}
+
 func loadAPIProxyListFromReader(r io.Reader, source string) ([]string, error) {
 	scanner := bufio.NewScanner(r)
 	proxies := make([]string, 0)
@@ -429,11 +475,7 @@ func loadProxyBypassList(filename string) ([]string, error) {
 	seen := make(map[string]struct{})
 	patterns := make([]string, 0)
 	for scanner.Scan() {
-		line := scanner.Text()
-		if idx := strings.Index(line, "#"); idx >= 0 {
-			line = line[:idx]
-		}
-		line = strings.TrimSpace(line)
+		line := stripComment(scanner.Text())
 		if line == "" {
 			continue
 		}
@@ -692,7 +734,13 @@ func run() int {
 		return 0
 	}
 
-	logWriter := clog.NewLogWriter(os.Stderr)
+	// When verbosity >= SILENT, pass io.Discard to NewLogWriter so it returns
+	// a zero-cost nullLogWriter: no goroutine is started, nothing is written.
+	logDst := io.Writer(os.Stderr)
+	if args.verbosity >= clog.SILENT {
+		logDst = io.Discard
+	}
+	logWriter := clog.NewLogWriter(logDst)
 	defer logWriter.Close()
 
 	mainLogger := clog.NewCondLogger(log.New(logWriter, "MAIN    : ",
@@ -701,11 +749,10 @@ func run() int {
 	proxyLogger := clog.NewCondLogger(log.New(logWriter, "PROXY   : ",
 		log.LstdFlags|log.Lshortfile),
 		args.verbosity)
-	socksLogDst := io.Writer(logWriter)
-	if args.verbosity >= clog.SILENT {
-		socksLogDst = io.Discard
-	}
-	socksLogger := log.New(socksLogDst, "SOCKS   : ",
+	// The go-socks5 library logs via a raw *log.Logger (bypasses CondLogger).
+	// When verbosity >= SILENT, logWriter is already a nullLogWriter, so
+	// this logger is also silenced automatically without extra branching.
+	socksLogger := log.New(logWriter, "SOCKS   : ",
 		log.LstdFlags|log.Lshortfile)
 
 	mainLogger.Info("opera-proxy client version %s is starting...", version())
@@ -757,7 +804,13 @@ func run() int {
 	}
 	mainLogger.Info("Proxy bypass loaded: %d rule(s).", len(args.proxyBypass.values))
 
-	try := retryPolicy(args.initRetries, args.initRetryInterval, mainLogger)
+	// rootCtx is cancelled on SIGINT/SIGTERM so retry waits and background
+	// tickers stop cleanly instead of blocking on time.Sleep or running forever.
+	rootCtx, rootCancel := signal.NotifyContext(context.Background(),
+		os.Interrupt, syscall.SIGTERM)
+	defer rootCancel()
+
+	try := retryPolicy(rootCtx, args.initRetries, args.initRetryInterval, mainLogger)
 	if args.apiAddress != "" {
 		mainLogger.Info("Using fixed API host address = %s", args.apiAddress)
 	}
@@ -774,14 +827,7 @@ func run() int {
 			err        error
 		)
 		if args.apiProxyListURL != "" {
-			downloadTransport := &http.Transport{
-				DialContext:           d.DialContext,
-				ForceAttemptHTTP2:     true,
-				MaxIdleConns:          100,
-				IdleConnTimeout:       90 * time.Second,
-				TLSHandshakeTimeout:   10 * time.Second,
-				ExpectContinueTimeout: 1 * time.Second,
-			}
+			downloadTransport := buildSETransport(d.DialContext, nil)
 			candidates, err = loadAPIProxyListFromURL(args.apiProxyListURL, downloadTransport, args.timeout)
 			if err != nil {
 				if args.apiProxyFile == "" {
@@ -865,21 +911,15 @@ func run() int {
 			ServerName:         args.fakeSNI,
 			InsecureSkipVerify: true,
 		}
-		seclient, err = se.NewSEClient(args.apiLogin, args.apiPassword, &http.Transport{
-			DialContext: seclientDialer.DialContext,
-			DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				conn, err := seclientDialer.DialContext(ctx, network, addr)
-				if err != nil {
-					return conn, err
-				}
-				return tls.Client(conn, tlsConfig), nil
-			},
-			ForceAttemptHTTP2:     true,
-			MaxIdleConns:          100,
-			IdleConnTimeout:       90 * time.Second,
-			TLSHandshakeTimeout:   10 * time.Second,
-			ExpectContinueTimeout: 1 * time.Second,
-		})
+		dialTLS := func(ctx context.Context, network, addr string) (net.Conn, error) {
+			conn, err := seclientDialer.DialContext(ctx, network, addr)
+			if err != nil {
+				return conn, err
+			}
+			return tls.Client(conn, tlsConfig), nil
+		}
+		seclient, err = se.NewSEClient(args.apiLogin, args.apiPassword,
+			buildSETransport(seclientDialer.DialContext, dialTLS))
 		if err != nil {
 			mainLogger.Critical("Unable to construct SEClient: %v", err)
 			return 8
@@ -889,7 +929,7 @@ func run() int {
 		seclient.Settings.UserAgent = args.apiUserAgent
 
 		err = try("anonymous registration", func() error {
-			ctx, cl := context.WithTimeout(context.Background(), args.timeout)
+			ctx, cl := context.WithTimeout(rootCtx, args.timeout)
 			defer cl()
 			return seclient.AnonRegister(ctx)
 		})
@@ -898,7 +938,7 @@ func run() int {
 		}
 
 		err = try("device registration", func() error {
-			ctx, cl := context.WithTimeout(context.Background(), args.timeout)
+			ctx, cl := context.WithTimeout(rootCtx, args.timeout)
 			defer cl()
 			return seclient.RegisterDevice(ctx)
 		})
@@ -955,7 +995,7 @@ func run() int {
 			var speedResults map[proxyEndpointKey]proxySpeedResult
 			if args.estimateProxySpeed {
 				mainLogger.Info("Measuring proxy response time for %d endpoints using %q.", countProxyPorts(ips), args.proxySpeedTestURL)
-				speedResults = benchmarkProxyEndpoints(args, ips, caPool, mainLogger, handlerDialerFactory)
+				speedResults = benchmarkProxyEndpoints(rootCtx, args, ips, caPool, mainLogger, handlerDialerFactory)
 			}
 			if args.listProxiesAllOut != "" {
 				if err := writeProxyCSV(args.listProxiesAllOut, ips, seclient, speedResults, args.sortProxiesBy); err != nil {
@@ -1013,7 +1053,7 @@ func run() int {
 			for i, ep := range ips {
 				dialers[i] = handlerDialerFactory(ep, ep.NetAddr())
 			}
-			ctx, cl := context.WithTimeout(context.Background(), args.serverSelectionTimeout)
+			ctx, cl := context.WithTimeout(rootCtx, args.serverSelectionTimeout)
 			defer cl()
 			handlerDialer, err = ss(ctx, dialers)
 			if err != nil {
@@ -1051,7 +1091,7 @@ func run() int {
 		handlerDialer = bypassDialer
 	}
 
-	clock.RunTicker(context.Background(), args.refresh, args.refreshRetry, func(ctx context.Context) error {
+	clock.RunTicker(rootCtx, args.refresh, args.refreshRetry, func(ctx context.Context) error {
 		mainLogger.Info("Refreshing login...")
 		reqCtx, cl := context.WithTimeout(ctx, args.timeout)
 		defer cl()
@@ -1233,11 +1273,7 @@ func loadProxyBlacklist(filename string) (map[string]struct{}, error) {
 	blacklist := make(map[string]struct{})
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
-		line := scanner.Text()
-		if idx := strings.Index(line, "#"); idx >= 0 {
-			line = line[:idx]
-		}
-		line = strings.TrimSpace(line)
+		line := stripComment(scanner.Text())
 		if line == "" {
 			continue
 		}
@@ -1594,8 +1630,8 @@ func loadProxyEntriesFromCSV(filename string, countryFilter string, allowAll boo
 		if ipAddr == "" {
 			return nil, fmt.Errorf("proxy CSV %q line %d has empty ip_address", filename, lineNo)
 		}
-		if net.ParseIP(ipAddr) == nil {
-			return nil, fmt.Errorf("proxy CSV %q line %d has invalid ip_address %q", filename, lineNo, ipAddr)
+		if _, err := netip.ParseAddr(ipAddr); err != nil {
+			return nil, fmt.Errorf("proxy CSV %q line %d has invalid ip_address %q: %w", filename, lineNo, ipAddr, err)
 		}
 
 		portValue, err := fieldValue(record, "port")
@@ -1645,25 +1681,23 @@ func loadProxyEntriesFromCSV(filename string, countryFilter string, allowAll boo
 
 func sortProxyEntries(entries []se.SEIPEntry) {
 	for i := range entries {
-		sort.Slice(entries[i].Ports, func(a, b int) bool {
-			return entries[i].Ports[a] < entries[i].Ports[b]
-		})
+		slices.Sort(entries[i].Ports)
 	}
-	sort.Slice(entries, func(i, j int) bool {
-		if entries[i].Geo.CountryCode != entries[j].Geo.CountryCode {
-			return entries[i].Geo.CountryCode < entries[j].Geo.CountryCode
+	slices.SortFunc(entries, func(a, b se.SEIPEntry) int {
+		if c := cmp.Compare(a.Geo.CountryCode, b.Geo.CountryCode); c != 0 {
+			return c
 		}
-		if entries[i].IP != entries[j].IP {
-			return entries[i].IP < entries[j].IP
+		if c := cmp.Compare(a.IP, b.IP); c != 0 {
+			return c
 		}
 		leftPort, rightPort := uint16(443), uint16(443)
-		if len(entries[i].Ports) > 0 {
-			leftPort = entries[i].Ports[0]
+		if len(a.Ports) > 0 {
+			leftPort = a.Ports[0]
 		}
-		if len(entries[j].Ports) > 0 {
-			rightPort = entries[j].Ports[0]
+		if len(b.Ports) > 0 {
+			rightPort = b.Ports[0]
 		}
-		return leftPort < rightPort
+		return cmp.Compare(leftPort, rightPort)
 	})
 }
 
@@ -1718,53 +1752,58 @@ func buildProxyRows(ips []se.SEIPEntry, speedResults map[proxyEndpointKey]proxyS
 }
 
 func sortProxyRows(rows []proxyListRow, sortBy string) {
-	sort.SliceStable(rows, func(i, j int) bool {
-		left, right := rows[i], rows[j]
+	slices.SortStableFunc(rows, func(left, right proxyListRow) int {
 		switch sortBy {
 		case "country":
-			if left.CountryCode != right.CountryCode {
-				return left.CountryCode < right.CountryCode
+			if c := cmp.Compare(left.CountryCode, right.CountryCode); c != 0 {
+				return c
 			}
-			if left.CountryName != right.CountryName {
-				return left.CountryName < right.CountryName
+			if c := cmp.Compare(left.CountryName, right.CountryName); c != 0 {
+				return c
 			}
-			if left.IP != right.IP {
-				return left.IP < right.IP
+			if c := cmp.Compare(left.IP, right.IP); c != 0 {
+				return c
 			}
-			return left.Port < right.Port
+			return cmp.Compare(left.Port, right.Port)
 		case "ip":
-			if left.IP != right.IP {
-				return left.IP < right.IP
+			if c := cmp.Compare(left.IP, right.IP); c != 0 {
+				return c
 			}
-			if left.Port != right.Port {
-				return left.Port < right.Port
+			if c := cmp.Compare(left.Port, right.Port); c != 0 {
+				return c
 			}
-			return left.CountryCode < right.CountryCode
+			return cmp.Compare(left.CountryCode, right.CountryCode)
 		default:
 			leftOK := left.HasSpeed && left.Speed.Err == nil
 			rightOK := right.HasSpeed && right.Speed.Err == nil
 			if leftOK != rightOK {
-				return leftOK
+				// Successful probes sort before failed ones.
+				if leftOK {
+					return -1
+				}
+				return 1
 			}
-			if leftOK && rightOK && left.Speed.Duration != right.Speed.Duration {
-				return left.Speed.Duration < right.Speed.Duration
+			if leftOK && rightOK {
+				if c := cmp.Compare(left.Speed.Duration, right.Speed.Duration); c != 0 {
+					return c
+				}
 			}
-			if left.CountryCode != right.CountryCode {
-				return left.CountryCode < right.CountryCode
+			if c := cmp.Compare(left.CountryCode, right.CountryCode); c != 0 {
+				return c
 			}
-			if left.IP != right.IP {
-				return left.IP < right.IP
+			if c := cmp.Compare(left.IP, right.IP); c != 0 {
+				return c
 			}
-			return left.Port < right.Port
+			return cmp.Compare(left.Port, right.Port)
 		}
 	})
 }
 
-func benchmarkProxyEndpoints(args *CLIArgs, ips []se.SEIPEntry, caPool *x509.CertPool, logger *clog.CondLogger, dialerFactory func(se.SEIPEntry, string) dialer.ContextDialer) map[proxyEndpointKey]proxySpeedResult {
+func benchmarkProxyEndpoints(benchCtx context.Context, args *CLIArgs, ips []se.SEIPEntry, caPool *x509.CertPool, logger *clog.CondLogger, dialerFactory func(se.SEIPEntry, string) dialer.ContextDialer) map[proxyEndpointKey]proxySpeedResult {
 	results := make(map[proxyEndpointKey]proxySpeedResult)
 	var mu sync.Mutex
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, 8)
+	sem := make(chan struct{}, BENCH_WORKERS)
 
 	for _, entry := range ips {
 		ports := entry.Ports
@@ -1785,7 +1824,7 @@ func benchmarkProxyEndpoints(args *CLIArgs, ips []se.SEIPEntry, caPool *x509.Cer
 				defer func() { <-sem }()
 
 				start := time.Now()
-				ctx, cl := context.WithTimeout(context.Background(), args.proxySpeedTimeout)
+				ctx, cl := context.WithTimeout(benchCtx, args.proxySpeedTimeout)
 				err := probeProxyEndpoint(ctx, dialerFactory(entry, endpoint), args.proxySpeedTestURL, args.proxySpeedDLLimit, &tls.Config{
 					RootCAs: caPool,
 				})
@@ -1813,51 +1852,33 @@ func benchmarkProxyEndpoints(args *CLIArgs, ips []se.SEIPEntry, caPool *x509.Cer
 	return results
 }
 
+// probeProxyEndpoint delegates to dialer.ProbeDialer, which is the single
+// canonical HTTP-probe implementation shared with server selection.
 func probeProxyEndpoint(ctx context.Context, upstream dialer.ContextDialer, targetURL string, dlLimit int64, tlsClientConfig *tls.Config) error {
-	httpClient := http.Client{
-		Transport: &http.Transport{
-			MaxIdleConns:          100,
-			IdleConnTimeout:       90 * time.Second,
-			TLSHandshakeTimeout:   10 * time.Second,
-			ExpectContinueTimeout: 1 * time.Second,
-			DialContext:           upstream.DialContext,
-			TLSClientConfig:       tlsClientConfig,
-			ForceAttemptHTTP2:     true,
-		},
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
-	if err != nil {
-		return err
-	}
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("http_%d", resp.StatusCode)
-	}
-
-	var reader io.Reader = resp.Body
-	if dlLimit > 0 {
-		reader = io.LimitReader(reader, dlLimit)
-	}
-	_, err = io.Copy(io.Discard, reader)
-	return err
+	return dialer.ProbeDialer(ctx, upstream, targetURL, dlLimit, tlsClientConfig)
 }
 
 func main() {
 	os.Exit(run())
 }
 
-func retryPolicy(retries int, retryInterval time.Duration, logger *clog.CondLogger) func(string, func() error) error {
+// retryPolicy returns a helper that calls f up to retries times (0 = infinite).
+// Between attempts it waits retryInterval, but wakes up immediately if ctx is
+// cancelled -- previously time.Sleep blocked even after Ctrl+C.
+func retryPolicy(ctx context.Context, retries int, retryInterval time.Duration, logger *clog.CondLogger) func(string, func() error) error {
 	return func(name string, f func() error) error {
 		var err error
 		for i := 1; retries <= 0 || i <= retries; i++ {
 			if i > 1 {
 				logger.Warning("Retrying action %q in %v...", name, retryInterval)
-				time.Sleep(retryInterval)
+				select {
+				case <-ctx.Done():
+					return fmt.Errorf("retry cancelled: %w", ctx.Err())
+				case <-time.After(retryInterval):
+				}
+			}
+			if ctx.Err() != nil {
+				return fmt.Errorf("retry cancelled: %w", ctx.Err())
 			}
 			logger.Info("Attempting action %q, attempt #%d...", name, i)
 			err = f()

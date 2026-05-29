@@ -1,23 +1,10 @@
 package seclient
 
-import (
-	crand "crypto/rand"
-	"math/big"
-)
-
-type secureRandomSource struct{}
-
-var RandomSource secureRandomSource
-
-var int63Limit = big.NewInt(0).Lsh(big.NewInt(1), 63)
-
-func (_ secureRandomSource) Seed(_ int64) {
-}
-
-func (_ secureRandomSource) Int63() int64 {
-	randNum, err := crand.Int(crand.Reader, int63Limit)
-	if err != nil {
-		panic(err)
-	}
-	return randNum.Int64()
-}
+// This file is intentionally minimal. The secureRandomSource adapter and the
+// RandomSource variable were previously needed to bridge crypto/rand into the
+// math/rand.Source interface (so rand.New could wrap it). Now that randutils.go
+// calls crypto/rand.Read directly, the bridge is no longer needed.
+//
+// The file is kept as a placeholder so any external code that may reference
+// the seclient package does not get a compilation failure from a missing file.
+// It can be removed entirely once confirmed no external callers remain.
