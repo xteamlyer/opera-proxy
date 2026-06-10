@@ -10,5 +10,5 @@ require (
 	github.com/ncruces/go-dns v1.3.3
 	github.com/things-go/go-socks5 v0.1.1
 	golang.org/x/crypto/x509roots/fallback v0.0.0-20260609182332-5f2de1a9f1e2
-	golang.org/x/net v0.55.0
+	golang.org/x/net v0.56.0
 )
