@@ -8,9 +8,9 @@ import (
 	"net"
 	"strings"
 
-	"github.com/Alexey71/opera-proxy/dialer"
 	"github.com/things-go/go-socks5"
 	"github.com/things-go/go-socks5/statute"
+	"github.com/xteamlyer/opera-proxy/dialer"
 )
 
 // NewSocksServer creates a SOCKS5 server using the provided dialer.
