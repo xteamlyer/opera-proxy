@@ -11,8 +11,8 @@ import (
 	"net/url"
 	"testing"
 
-	"github.com/Alexey71/opera-proxy/dialer"
-	clog "github.com/Alexey71/opera-proxy/log"
+	"github.com/xteamlyer/opera-proxy/dialer"
+	clog "github.com/xteamlyer/opera-proxy/log"
 )
 
 type recordingDialer struct {
