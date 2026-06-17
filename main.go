@@ -29,12 +29,12 @@ import (
 
 	xproxy "golang.org/x/net/proxy"
 
-	"github.com/Alexey71/opera-proxy/clock"
-	"github.com/Alexey71/opera-proxy/dialer"
-	"github.com/Alexey71/opera-proxy/handler"
-	clog "github.com/Alexey71/opera-proxy/log"
-	"github.com/Alexey71/opera-proxy/resolver"
-	se "github.com/Alexey71/opera-proxy/seclient"
+	"github.com/xteamlyer/opera-proxy/clock"
+	"github.com/xteamlyer/opera-proxy/dialer"
+	"github.com/xteamlyer/opera-proxy/handler"
+	clog "github.com/xteamlyer/opera-proxy/log"
+	"github.com/xteamlyer/opera-proxy/resolver"
+	se "github.com/xteamlyer/opera-proxy/seclient"
 
 	_ "golang.org/x/crypto/x509roots/fallback"
 	"golang.org/x/crypto/x509roots/fallback/bundle"

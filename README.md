@@ -1,5 +1,8 @@
-opera-proxy
-===========
+# opera-proxy fork
+
+- Original author - [Snawoot](https://github.com/Snawoot)
+- Fork based - [Alexey71](https://github.com/Alexey71)
+- Some ideas - [SLY-F0X](https://github.com/SLY-F0X)
 
 Standalone Opera VPN client.
 
