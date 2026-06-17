@@ -10,7 +10,7 @@ github.com/things-go/go-socks5 v0.1.4 h1:DF0OvKL4O1pxmSh2J/suagjyGV7+hduBblpldPO
 github.com/things-go/go-socks5 v0.1.4/go.mod h1:LZ99kKdQKnpwKv9P1Ilowna9cafg3cmYB/Dr1iagwDg=
 go.yaml.in/yaml/v3 v3.0.5 h1:N6y/pJk8buWs9NY5ERU2HSMfm+IuD/OtfdAnq6kESPw=
 go.yaml.in/yaml/v3 v3.0.5/go.mod h1:HVTZu1O7/Vkt2N+BFy8Zza+lnLsABggaTM2ZpNIGuKg=
-golang.org/x/crypto/x509roots/fallback v0.0.0-20261115193255-739070949446 h1:8hk854wkDB8NBK5A42QtEsIeC+alb1soEzMK9BDKaRE=
-golang.org/x/crypto/x509roots/fallback v0.0.0-20261115193255-739070949446/go.mod h1:HPze8vhfG6fO06AM+VSvxRm4E3+5Yk375mgrJ5M2z1E=
+golang.org/x/crypto/x509roots/fallback v0.0.0-20261123165210-6c21c5864259 h1:wXcJiWf6AuFE+YJzfySrqJW1+yko6kcV2W+fg4n6WGk=
+golang.org/x/crypto/x509roots/fallback v0.0.0-20261123165210-6c21c5864259/go.mod h1:HPze8vhfG6fO06AM+VSvxRm4E3+5Yk375mgrJ5M2z1E=
 golang.org/x/net v0.63.0 h1:HCoTmNh9EpD1PpK8gBNFY4gcTY4N+KQEO8ylfIKqFJ0=
 golang.org/x/net v0.63.0/go.mod h1:15JLg3IX1bLjHK264EZQEbIpTiR/KVLuo9CTRWd0pig=
