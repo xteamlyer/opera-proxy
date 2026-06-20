@@ -2,6 +2,7 @@ package dialer
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -227,7 +228,7 @@ func readResponse(conn net.Conn, req *http.Request) (*http.Response, error) {
 		peeked, _ := br.Peek(n)
 		// Wrap the connection so unconsumed buffered bytes are replayed first.
 		conn = &prefixConn{
-			Reader: io.MultiReader(strings.NewReader(string(peeked)), conn),
+			Reader: io.MultiReader(bytes.NewReader(peeked), conn),
 			Conn:   conn,
 		}
 		// Discard the already-peeked bytes from the bufio buffer.

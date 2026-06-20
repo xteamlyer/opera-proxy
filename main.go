@@ -643,7 +643,7 @@ func testAPIProxyCandidate(ctx context.Context, args *CLIArgs, baseDialer dialer
 	return result
 }
 
-func selectAPIProxyCandidate(args *CLIArgs, baseDialer dialer.ContextDialer, caPool *x509.CertPool, logger *clog.CondLogger, candidates []string, needDiscover bool, needCountries bool) (apiProxyCandidateResult, error) {
+func selectAPIProxyCandidate(parent context.Context, args *CLIArgs, baseDialer dialer.ContextDialer, caPool *x509.CertPool, logger *clog.CondLogger, candidates []string, needDiscover bool, needCountries bool) (apiProxyCandidateResult, error) {
 	if len(candidates) == 0 {
 		return apiProxyCandidateResult{}, errors.New("no API proxy candidates provided")
 	}
@@ -653,7 +653,8 @@ func selectAPIProxyCandidate(args *CLIArgs, baseDialer dialer.ContextDialer, caP
 		parallelism = len(candidates)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	// Derive from parent so Ctrl+C cancels the whole selection immediately.
+	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 
 	type candidateJob struct {
@@ -867,7 +868,7 @@ func run() int {
 		mainLogger.Info("Loaded %d API proxy candidates. Testing up to %d in parallel.", len(candidates), parallelism)
 
 		needDiscover := args.listProxies || args.listProxiesAll || args.dpExport || args.overrideProxyAddress == ""
-		result, err := selectAPIProxyCandidate(args, d, caPool, mainLogger, candidates, needDiscover, args.listCountries)
+		result, err := selectAPIProxyCandidate(rootCtx, args, d, caPool, mainLogger, candidates, needDiscover, args.listCountries)
 		if err != nil {
 			mainLogger.Critical("All API proxy candidates failed. Last error: %v", err)
 			return 12
@@ -947,7 +948,7 @@ func run() int {
 		}
 
 		if args.listCountries {
-			return printCountries(try, mainLogger, args.timeout, seclient)
+			return printCountries(rootCtx, try, mainLogger, args.timeout, seclient)
 		}
 	}
 
@@ -975,9 +976,9 @@ func run() int {
 			err = try("discover", func() error {
 				var discoverErr error
 				if args.listProxiesAll {
-					ips, discoverErr = discoverAllCountries(args, seclient, mainLogger)
+					ips, discoverErr = discoverAllCountries(rootCtx, args, seclient, mainLogger)
 				} else {
-					ips, discoverErr = discoverCountry(args, seclient, mainLogger, args.country)
+					ips, discoverErr = discoverCountry(rootCtx, args, seclient, mainLogger, args.country)
 				}
 				if discoverErr != nil {
 					return discoverErr
@@ -1017,7 +1018,7 @@ func run() int {
 	if args.overrideProxyAddress == "" {
 		if !preloadedDiscovery {
 			err = try("discover", func() error {
-				res, err := discoverCountry(args, seclient, mainLogger, args.country)
+				res, err := discoverCountry(rootCtx, args, seclient, mainLogger, args.country)
 				if err != nil {
 					return err
 				}
@@ -1133,10 +1134,10 @@ func run() int {
 	}
 
 	select {
-		case <-rootCtx.Done():
-			mainLogger.Info("Server terminated with a reason: %v", context.Cause(rootCtx))
-		case err = <-errChan:
-			mainLogger.Critical("Server terminated with a fatal error: %v", err)
+	case <-rootCtx.Done():
+		mainLogger.Info("Server terminated with a reason: %v", context.Cause(rootCtx))
+	case err = <-errChan:
+		mainLogger.Critical("Server terminated with a fatal error: %v", err)
 	}
 	mainLogger.Info("Shutting down...")
 	return 0
@@ -1158,10 +1159,10 @@ func printCountryList(list []se.SEGeoEntry) int {
 	return 0
 }
 
-func printCountries(try func(string, func() error) error, logger *clog.CondLogger, timeout time.Duration, seclient *se.SEClient) int {
+func printCountries(parent context.Context, try func(string, func() error) error, logger *clog.CondLogger, timeout time.Duration, seclient *se.SEClient) int {
 	var list []se.SEGeoEntry
 	err := try("geolist", func() error {
-		ctx, cl := context.WithTimeout(context.Background(), timeout)
+		ctx, cl := context.WithTimeout(parent, timeout)
 		defer cl()
 		l, err := seclient.GeoList(ctx)
 		list = l
@@ -1447,8 +1448,8 @@ func discoverCountryWithContext(parent context.Context, args *CLIArgs, seclient 
 	return aggregated, nil
 }
 
-func discoverCountry(args *CLIArgs, seclient *se.SEClient, logger *clog.CondLogger, countryCode string) ([]se.SEIPEntry, error) {
-	return discoverCountryWithContext(context.Background(), args, seclient, logger, countryCode)
+func discoverCountry(ctx context.Context, args *CLIArgs, seclient *se.SEClient, logger *clog.CondLogger, countryCode string) ([]se.SEIPEntry, error) {
+	return discoverCountryWithContext(ctx, args, seclient, logger, countryCode)
 }
 
 func discoverAllCountriesWithContext(parent context.Context, args *CLIArgs, seclient *se.SEClient, logger *clog.CondLogger, countryFilter string) ([]se.SEIPEntry, error) {
@@ -1494,8 +1495,8 @@ func discoverAllCountriesWithContext(parent context.Context, args *CLIArgs, secl
 	return all, nil
 }
 
-func discoverAllCountries(args *CLIArgs, seclient *se.SEClient, logger *clog.CondLogger) ([]se.SEIPEntry, error) {
-	return discoverAllCountriesWithContext(context.Background(), args, seclient, logger, args.country)
+func discoverAllCountries(ctx context.Context, args *CLIArgs, seclient *se.SEClient, logger *clog.CondLogger) ([]se.SEIPEntry, error) {
+	return discoverAllCountriesWithContext(ctx, args, seclient, logger, args.country)
 }
 
 func appendUniqueProxies(dst, src []se.SEIPEntry, seen map[proxyEndpointKey]struct{}) []se.SEIPEntry {
@@ -1675,7 +1676,13 @@ func loadProxyEntriesFromCSV(filename string, countryFilter string, allowAll boo
 		entries = appendUniqueProxies(entries, []se.SEIPEntry{entry}, seen)
 	}
 
-	entries, _ = filterBlacklistedProxyEntries(entries, blacklist)
+	var blockedCSV []string
+	entries, blockedCSV = filterBlacklistedProxyEntries(entries, blacklist)
+	if len(blockedCSV) > 0 {
+		// Blacklisted entries are recorded in the CSV-load path without a
+		// logger reference; write directly to stderr so they are not lost.
+		fmt.Fprintf(os.Stderr, "loadProxyEntriesFromCSV: skipped %d blacklisted endpoints: %v\n", len(blockedCSV), blockedCSV)
+	}
 	if len(entries) == 0 {
 		if allowAll {
 			if allCountries {

@@ -81,12 +81,17 @@ func (s *ProxyHandler) HandleTunnel(wr http.ResponseWriter, req *http.Request) {
 		http.Error(wr, "Can't satisfy CONNECT request", http.StatusBadGateway)
 		return
 	}
+	// conn must be closed on every early-return path. When proxy() or
+	// proxyh2() take ownership, they close conn themselves via dst.Close()
+	// inside the copy goroutines. All other paths fall through to conn.Close().
+	defer conn.Close()
 
 	if req.ProtoMajor == 0 || req.ProtoMajor == 1 {
 		// Upgrade client connection
 		localconn, _, err := hijack(wr)
 		if err != nil {
 			s.logger.Error("Can't hijack client connection: %v", err)
+			// conn will be closed by the deferred conn.Close() above.
 			http.Error(wr, "Can't hijack client connection", http.StatusInternalServerError)
 			return
 		}
@@ -104,7 +109,7 @@ func (s *ProxyHandler) HandleTunnel(wr http.ResponseWriter, req *http.Request) {
 	} else {
 		s.logger.Error("Unsupported protocol version: %s", req.Proto)
 		http.Error(wr, "Unsupported protocol version.", http.StatusBadRequest)
-		return
+		// conn closed by defer above.
 	}
 }
 

@@ -25,10 +25,13 @@ func NewStdJar() (*StdJar, error) {
 	return &jar, nil
 }
 
+// SetCookies writes cookies into the jar.
+// Must use Lock (not RLock): cookiejar.Jar.SetCookies mutates internal state
+// and is not safe for concurrent use with any other Jar method.
 func (j *StdJar) SetCookies(u *url.URL, cookies []*http.Cookie) {
-	j.mux.RLock()
+	j.mux.Lock()
 	j.jar.SetCookies(u, cookies)
-	j.mux.RUnlock()
+	j.mux.Unlock()
 }
 
 func (j *StdJar) Cookies(u *url.URL) []*http.Cookie {

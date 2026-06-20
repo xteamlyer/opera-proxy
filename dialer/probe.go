@@ -22,9 +22,11 @@ const (
 // (NewFastestServerSelectionFunc) and the stand-alone speed test
 // (benchmarkProxyEndpoints in main.go).
 //
-// Previously main.go had its own copy called probeProxyEndpoint with an
-// identical body. That copy has been replaced by a call to this function to
-// eliminate the duplication.
+// The http.Transport is explicitly closed via CloseIdleConnections after the
+// probe completes. Without this, each call would leave an idle-connection
+// goroutine and its associated socket running until the IdleConnTimeout
+// expired — with hundreds of concurrent speed probes this caused significant
+// goroutine and fd leakage.
 func ProbeDialer(ctx context.Context, d ContextDialer, targetURL string, dlLimit int64, tlsClientConfig *tls.Config) error {
 	t := &http.Transport{
 		MaxIdleConns:          probeMaxIdleConns,
@@ -35,6 +37,10 @@ func ProbeDialer(ctx context.Context, d ContextDialer, targetURL string, dlLimit
 		TLSClientConfig:       tlsClientConfig,
 		ForceAttemptHTTP2:     true,
 	}
+	// Always release idle connections when we are done with this one-shot
+	// transport, regardless of whether the probe succeeds or fails.
+	defer t.CloseIdleConnections()
+
 	httpClient := http.Client{Transport: t}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)

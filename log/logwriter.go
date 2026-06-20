@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"time"
 )
 
@@ -44,17 +45,16 @@ func (lw *LogWriter) Close() {
 }
 
 // loop drains the channel and writes each buffer to the underlying writer.
-// Write errors are reported to stderr via fmt.Fprintf so they are never
-// silently discarded — previously lw.writer.Write(p) ignored the return value,
-// meaning a broken pipe or a full disk would go unnoticed.
+// Write errors are printed to os.Stderr directly so they are never silently
+// discarded — a broken pipe or a full disk is reported immediately without
+// re-entering LogWriter.
 func (lw *LogWriter) loop() {
 	for p := range lw.ch {
 		if p == nil {
 			break
 		}
 		if _, err := lw.writer.Write(p); err != nil {
-			// Use fmt.Fprintf to stderr directly to avoid re-entering LogWriter.
-			fmt.Fprintf(io.Discard, "log write error: %v\n", err)
+			fmt.Fprintf(os.Stderr, "log write error: %v\n", err)
 		}
 	}
 	lw.done <- struct{}{}

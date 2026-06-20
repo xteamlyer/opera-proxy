@@ -17,6 +17,12 @@ import (
 // path (when the deadline has already passed before the first tick).
 func AfterWallClock(d time.Duration) <-chan time.Time {
 	ch := make(chan time.Time, 1)
+	// Guard against time.NewTicker panicking on non-positive durations.
+	// A zero or negative interval means "fire immediately".
+	if d <= 0 {
+		ch <- time.Now()
+		return ch
+	}
 	deadline := time.Now().Add(d)
 	ticker := time.NewTicker(time.Second)
 	go func() {
