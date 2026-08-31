@@ -18,6 +18,8 @@ golang.org/x/crypto/x509roots/fallback v0.0.0-20260722173706-90f76b8ffe14 h1:VEL
 golang.org/x/crypto/x509roots/fallback v0.0.0-20260722173706-90f76b8ffe14/go.mod h1:+UoQFNBq2p2wO+Q6ddVtYc25GZ6VNdOMyyrd4nrqrKs=
 golang.org/x/crypto/x509roots/fallback v0.0.0-20260723152544-d701c51f7e4e h1:9TjMDOuGaMMTP5f7GXeHeA0JvFqGmv4DYRIWkzoePGI=
 golang.org/x/crypto/x509roots/fallback v0.0.0-20260723152544-d701c51f7e4e/go.mod h1:+UoQFNBq2p2wO+Q6ddVtYc25GZ6VNdOMyyrd4nrqrKs=
+golang.org/x/crypto/x509roots/fallback v0.0.0-20260831030451-39dc44e69c28 h1:VGsh+SrjmdHqdobxsDfGOubyhT1ShO94Ng0Y9U5W9/E=
+golang.org/x/crypto/x509roots/fallback v0.0.0-20260831030451-39dc44e69c28/go.mod h1:HPze8vhfG6fO06AM+VSvxRm4E3+5Yk375mgrJ5M2z1E=
 golang.org/x/net v0.57.0 h1:K5+3DljvIuDG9/Jv9rvyMywYNFCQ9RSUY6OOTTkT+tE=
 golang.org/x/net v0.57.0/go.mod h1:KpXc8iv+r3XplLAG/f7Jsf9RPszJzdR0f58q9vGOuEU=
 gopkg.in/yaml.v3 v3.0.1 h1:fxVm/GzAzEWqLHuvctI91KS9hhNmmWOoWu0XTYJS7CA=
