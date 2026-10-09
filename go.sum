@@ -14,5 +14,7 @@ golang.org/x/crypto/x509roots/fallback v0.0.0-20261009005802-2437861a3035 h1:l0t
 golang.org/x/crypto/x509roots/fallback v0.0.0-20261009005802-2437861a3035/go.mod h1:HPze8vhfG6fO06AM+VSvxRm4E3+5Yk375mgrJ5M2z1E=
 golang.org/x/crypto/x509roots/fallback v0.0.0-20261009162417-8fdf07b31142 h1:DBbKKon0mEWrINp0MvFOcf6Bjiru6u8B/vjpv5SF30U=
 golang.org/x/crypto/x509roots/fallback v0.0.0-20261009162417-8fdf07b31142/go.mod h1:HPze8vhfG6fO06AM+VSvxRm4E3+5Yk375mgrJ5M2z1E=
+golang.org/x/crypto/x509roots/fallback v0.0.0-20261009182249-c623b6c37b79 h1:N1WERnDZpa1EXFxMb2WDtlgrYzaIwxNeXG4chO3ifts=
+golang.org/x/crypto/x509roots/fallback v0.0.0-20261009182249-c623b6c37b79/go.mod h1:HPze8vhfG6fO06AM+VSvxRm4E3+5Yk375mgrJ5M2z1E=
 golang.org/x/net v0.60.0 h1:79p50tfZlm0J9YfoDsSi639qSXNGVwEzOPLCxM2FsYU=
 golang.org/x/net v0.60.0/go.mod h1:2DA/G1UfVbCpQPeWTmMPGY7Cs2PkBkwu743bVX5PIVg=
