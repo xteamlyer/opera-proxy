@@ -12,5 +12,7 @@ go.yaml.in/yaml/v3 v3.0.5 h1:N6y/pJk8buWs9NY5ERU2HSMfm+IuD/OtfdAnq6kESPw=
 go.yaml.in/yaml/v3 v3.0.5/go.mod h1:HVTZu1O7/Vkt2N+BFy8Zza+lnLsABggaTM2ZpNIGuKg=
 golang.org/x/crypto/x509roots/fallback v0.0.0-20261111072342-6c966a7517bf h1:2eTtX4tsXGkCzlXbAM3gKP5f5EDOsAghEVjlbdNmXrY=
 golang.org/x/crypto/x509roots/fallback v0.0.0-20261111072342-6c966a7517bf/go.mod h1:HPze8vhfG6fO06AM+VSvxRm4E3+5Yk375mgrJ5M2z1E=
+golang.org/x/crypto/x509roots/fallback v0.0.0-20261111203624-6bec4215b57b h1:WsXYbjUmos37zBS7kELcapHGF+Hq0xdKNsb2Yl5Oy1Q=
+golang.org/x/crypto/x509roots/fallback v0.0.0-20261111203624-6bec4215b57b/go.mod h1:HPze8vhfG6fO06AM+VSvxRm4E3+5Yk375mgrJ5M2z1E=
 golang.org/x/net v0.62.0 h1:18ELalfM5+XNRwzM2nYqXsZQ9ByS1uhj2O/U7+5jqRY=
 golang.org/x/net v0.62.0/go.mod h1:WgDCOTH8iwtB66T4/GfI94AHo/hhdb7Hah9NDseQfiI=
