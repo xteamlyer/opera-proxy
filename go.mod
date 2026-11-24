@@ -9,6 +9,6 @@ require (
 	github.com/Alexey71/go-multierror v1.1.3
 	github.com/ncruces/go-dns v1.3.4
 	github.com/things-go/go-socks5 v0.1.4
-	golang.org/x/crypto/x509roots/fallback v0.0.0-20261123165210-6c21c5864259
+	golang.org/x/crypto/x509roots/fallback v0.0.0-20261123192653-4dc4fb521066
 	golang.org/x/net v0.63.0
 )
